@@ -34,14 +34,16 @@ so rather than inventing one.
 
 ## Knowledge base
 
-`data/knowledge_base.json` is a flat array of menu items — one row each, all
-27 keys always present (`null` where a field doesn't apply):
+`data/knowledge_base.json` is a flat array — one row per menu item, plus a
+set of `faq` rows (`item_type` tells them apart). All 29 keys are present on
+every row (`null` where a field doesn't apply — FAQ rows null out the menu-
+specific fields):
 
 | Group | Fields |
 |---|---|
 | Identity | `id`, `name`, `slug`, `category` / `category_slug` / `category_path`, `description` |
 | Retrieval | `embedding_text` — the only vectorized field |
-| Price | `price_gbp`, `price_source` |
+| Price | `price_gbp` |
 | Nutrition (per serving) | `kcal`, `protein_g`, `fat_g`, `carbs_g`, `sugars_g`, `sat_fat_g`, `sodium_g`, `salt_g`, `fibre_g` |
 | Allergens & diet | `allergens_contains`, `allergens_may_contain`, `dietary_tags`, `is_gluten_free_listed` |
 | Serving | `portion_value` / `portion_unit`, `servings`, `abv_percent` |
