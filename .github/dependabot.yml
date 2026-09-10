@@ -29,7 +29,6 @@ updates:
     commit-message:
       prefix: "chore(deps)"
       prefix-development: "chore(dev-deps)"
-      include: "scope"
     groups:
       # Minor + patch across everything land as one PR to cut review noise.
       python-minor-patch:
@@ -58,7 +57,6 @@ updates:
     labels: ["dependencies", "docker"]
     commit-message:
       prefix: "chore(deps)"
-      include: "scope"
     groups:
       docker-minor-patch:
         applies-to: version-updates
@@ -83,7 +81,6 @@ updates:
     labels: ["dependencies", "ci"]
     commit-message:
       prefix: "chore(ci)"
-      include: "scope"
     groups:
       github-actions:
         patterns: ["*"]
@@ -103,4 +100,3 @@ updates:
     labels: ["dependencies", "devcontainer"]
     commit-message:
       prefix: "chore(deps)"
-      include: "scope"
