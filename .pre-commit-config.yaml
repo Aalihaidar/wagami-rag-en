@@ -14,6 +14,10 @@ repos:
       - id: detect-private-key
       - id: check-added-large-files
       - id: mixed-line-ending
+        # Default is --fix=auto (whichever ending already dominates the file).
+        # Pin to LF so the hook agrees with .gitattributes instead of ratifying
+        # whatever a Windows editor happened to write.
+        args: [--fix=lf]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.6  # keep in step with the ruff floor in pyproject.toml
