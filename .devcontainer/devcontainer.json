@@ -7,7 +7,8 @@
   "features": {
     "ghcr.io/devcontainers/features/node:2": {
       "version": "lts"
-    }
+    },
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
   },
 
   "forwardPorts": [8000, 5678, 6379],
@@ -20,6 +21,7 @@
   "customizations": {
     "vscode": {
       "extensions": [
+        "anthropic.claude-code",
         "ms-python.python",
         "ms-python.vscode-pylance",
         "charliermarsh.ruff",
