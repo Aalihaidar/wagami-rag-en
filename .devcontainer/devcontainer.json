@@ -1,0 +1,53 @@
+{
+  "name": "wagami-rag-en",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace",
+
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    }
+  },
+
+  "forwardPorts": [8000, 5678, 6379],
+  "portsAttributes": {
+    "8000": { "label": "FastAPI dev server" },
+    "5678": { "label": "debugpy" },
+    "6379": { "label": "Redis" }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "ms-azuretools.vscode-docker",
+        "eamodio.gitlens",
+        "redhat.vscode-yaml",
+        "tamasfe.even-better-toml",
+        "DorianMassoulier.repomix-runner",
+        "0xTanzim.filetree-pro",
+        "bierner.markdown-mermaid",
+        "ms-toolsai.jupyter",
+        "github.vscode-github-actions",
+        "mikestead.dotenv",
+        "rangav.vscode-thunder-client",
+        "streetsidesoftware.code-spell-checker"
+      ],
+      "settings": {
+        "remote.containers.enableWSLg": false,
+        "python.defaultInterpreterPath": "/workspace/.venv/bin/python",
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.formatOnSave": true,
+          "editor.codeActionsOnSave": { "source.fixAll.ruff": "explicit" }
+        }
+      }
+    }
+  },
+
+  "postStartCommand": "bash /usr/local/bin/welcome.sh",
+  "remoteUser": "root"
+}

@@ -1,0 +1,106 @@
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Every ecosystem opens PRs against `develop` (never `main`). Dependabot reads
+# THIS file from the repository's default branch, so once `develop` exists it
+# must be set as the default branch (or this file merged there) for these
+# configs to take effect. `develop` must exist before the first run.
+version: 2
+
+updates:
+  # ---------------------------------------------------------------------------
+  # Python — uv (pyproject.toml + uv.lock), all groups (dev + notebook too)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "uv"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 20
+    # Only bump the pyproject floor when the current constraint can't satisfy
+    # the new version; otherwise just refresh uv.lock.
+    versioning-strategy: "increase-if-necessary"
+    # Direct AND indirect (transitive) dependencies, every update type.
+    allow:
+      - dependency-type: "all"
+    labels: ["dependencies", "python"]
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(dev-deps)"
+      include: "scope"
+    groups:
+      # Minor + patch across everything land as one PR to cut review noise.
+      python-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
+    # Majors are deliberately NOT grouped — each breaking bump gets its own PR.
+
+  # ---------------------------------------------------------------------------
+  # Docker — docker-compose.yml at the root AND docker/Dockerfile.*
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "docker"
+    directories:
+      - "/"        # docker-compose.yml (redis, ...)
+      - "/docker"  # Dockerfile.dev, Dockerfile.prod (later)
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    labels: ["dependencies", "docker"]
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      docker-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      docker-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  # ---------------------------------------------------------------------------
+  # GitHub Actions — SHA pins in .github/workflows/*; bumps SHA + version comment
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    labels: ["dependencies", "ci"]
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # ---------------------------------------------------------------------------
+  # Dev container — .devcontainer/devcontainer.json feature versions
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "devcontainers"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    labels: ["dependencies", "devcontainer"]
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"

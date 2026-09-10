@@ -1,0 +1,83 @@
+{
+  // --- Interpreter -------------------------------------------------------
+  // The uv-managed venv created by `uv sync` (same path as devcontainer.json).
+  "python.defaultInterpreterPath": "/workspace/.venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+
+  // --- Formatting & lint (Ruff is the single tool: lint + format + imports) ---
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll.ruff": "explicit",
+      "source.organizeImports.ruff": "explicit"
+    }
+  },
+
+  // --- Pylance ---------------------------------------------------------------
+  // "basic" matches the lenient mypy config (disallow_untyped_defs = false).
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.autoImportCompletions": true,
+  "python.analysis.diagnosticMode": "workspace",
+
+  // --- Testing (pytest is configured in pyproject; tests/ arrives later) ---
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": ["tests"],
+
+  // --- Editor conventions that match the toolchain ------------------------
+  "editor.rulers": [100],
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "[markdown]": { "files.trimTrailingWhitespace": false },
+
+  // --- Hide generated dirs from Explorer / search / file watcher ----------
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.egg-info": true,
+    "**/.mypy_cache": true,
+    "**/.ruff_cache": true,
+    "**/.pytest_cache": true
+  },
+  "search.exclude": {
+    "**/.venv": true,
+    "**/uv.lock": true,
+    "**/data/images": true
+  },
+  "files.watcherExclude": {
+    "**/.venv/**": true,
+    "**/.git/**": true,
+    "**/.mypy_cache/**": true,
+    "**/.ruff_cache/**": true,
+    "**/.pytest_cache/**": true
+  },
+
+  // --- File associations for installed extensions ------------------------
+  "files.associations": { "*.env": "dotenv", ".env.example": "dotenv" },
+  "redhat.telemetry.enabled": false,
+
+  // --- Project vocabulary for the spell checker -------------------------
+  "cSpell.words": [
+    "checkpointing",
+    "cohere",
+    "debugpy",
+    "devcontainer",
+    "dotenv",
+    "gunicorn",
+    "Haidar",
+    "katsu",
+    "kcal",
+    "langchain",
+    "langgraph",
+    "mypy",
+    "pydantic",
+    "pyproject",
+    "pytest",
+    "repomix",
+    "uvicorn",
+    "vectorizer",
+    "wagami",
+    "weaviate"
+  ]
+}

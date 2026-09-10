@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  push:
+    # Feature branches get CI via the pull_request trigger below; restricting
+    # push to the long-lived branches + tags avoids duplicate runs per commit.
+    branches: [main, develop]
+    tags: ["v*"]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Least privilege by default; no job here writes to the repo.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # Cancel superseded PR runs, but let every push to main/develop finish so
+  # each commit on a protected branch keeps its own CI record.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify-pr-source:
+    if: github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ensure PRs into main only come from develop
+        run: |
+          HEAD_REF="${{ github.event.pull_request.head.ref }}"
+          if [ "$HEAD_REF" != "develop" ]; then
+            echo "❌ PRs into 'main' are only allowed from 'develop' (got '$HEAD_REF')."
+            exit 1
+          fi
+          echo "✅ PR source verified: develop -> main"
+
+  # Phase 1 has no app/, tests/, or docker/Dockerfile.prod yet. Detect what is
+  # actually present so the jobs that need those paths activate on their own
+  # once they land, instead of failing every run until then.
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_app: ${{ steps.paths.outputs.has_app }}
+      has_tests: ${{ steps.paths.outputs.has_tests }}
+      has_prod_dockerfile: ${{ steps.paths.outputs.has_prod_dockerfile }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: paths
+        run: |
+          found() { [ -n "$(find "$1" -name "$2" 2>/dev/null | head -n1)" ] && echo true || echo false; }
+          {
+            echo "has_app=$(found app '*.py')"
+            echo "has_tests=$(found tests 'test_*.py')"
+            echo "has_prod_dockerfile=$([ -f docker/Dockerfile.prod ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-suffix: lint
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  typecheck:
+    needs: detect
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-suffix: typecheck
+      - run: uv sync --frozen
+      - name: mypy (scripts always; app when it exists)
+        run: |
+          if [ "${{ needs.detect.outputs.has_app }}" = "true" ]; then
+            uv run mypy scripts app
+          else
+            uv run mypy scripts
+          fi
+
+  test:
+    needs: detect
+    if: needs.detect.outputs.has_tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-suffix: test
+      - run: uv sync --frozen
+      - run: uv run pytest --cov=app --cov-report=xml
+      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-suffix: security
+      - run: uv sync --frozen
+      - run: uv run pip-audit
+
+  dockerfile-check:
+    needs: detect
+    if: needs.detect.outputs.has_prod_dockerfile == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Trivy Dockerfile config scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: docker/Dockerfile.prod
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
+  ci-passed:
+    if: always()
+    needs: [verify-pr-source, detect, lint, typecheck, test, security, dockerfile-check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check all required jobs succeeded
+        run: |
+          # Conditional jobs (verify-pr-source, test, dockerfile-check) are
+          # skipped until their trigger/paths exist — treat skipped as OK.
+          for result in \
+            "${{ needs.verify-pr-source.result }}" \
+            "${{ needs.detect.result }}" \
+            "${{ needs.lint.result }}" \
+            "${{ needs.typecheck.result }}" \
+            "${{ needs.test.result }}" \
+            "${{ needs.security.result }}" \
+            "${{ needs.dockerfile-check.result }}"; do
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              echo "❌ A required job failed: $result"
+              exit 1
+            fi
+          done
+          echo "✅ CI passed"

@@ -1,0 +1,40 @@
+name: Bug report
+description: Something is broken or behaves incorrectly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For security issues use the private advisory form instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, and what actually happened?
+      placeholder: |
+        Steps:
+        1. ...
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error output
+      description: Paste relevant output. Redact keys, URLs, and `.env` values.
+      render: text
+  - type: input
+    id: area
+    attributes:
+      label: Area
+      description: e.g. load_knowledge_base.py, delete_knowledge_base.py, CI, devcontainer, data
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Python version, `uv --version`, whether inside the devcontainer.
+    validations:
+      required: true

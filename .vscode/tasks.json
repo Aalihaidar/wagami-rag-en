@@ -1,0 +1,70 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "uv: sync",
+      "type": "shell",
+      "command": "uv sync",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "ruff: check",
+      "type": "shell",
+      "command": "uv run ruff check .",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": {
+        "owner": "ruff",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^(.+?):(\\d+):(\\d+):\\s+(\\w+)\\s+(.*)$",
+          "file": 1, "line": 2, "column": 3, "code": 4, "message": 5
+        }
+      }
+    },
+    {
+      "label": "ruff: fix + format",
+      "type": "shell",
+      "command": "uv run ruff check --fix . && uv run ruff format .",
+      "problemMatcher": []
+    },
+    {
+      "label": "mypy",
+      "type": "shell",
+      "command": "uv run mypy scripts",
+      "problemMatcher": {
+        "owner": "mypy",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^(.+?):(\\d+):\\s+(error|warning|note):\\s+(.*)$",
+          "file": 1, "line": 2, "severity": 3, "message": 4
+        }
+      }
+    },
+    {
+      "label": "pytest",
+      "type": "shell",
+      "command": "uv run pytest",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "checks: ruff + mypy",
+      "dependsOrder": "sequence",
+      "dependsOn": ["ruff: check", "mypy"],
+      "problemMatcher": []
+    },
+    {
+      "label": "KB: load (create schema + import)",
+      "type": "shell",
+      "command": "uv run python scripts/load_knowledge_base.py",
+      "problemMatcher": []
+    },
+    {
+      "label": "KB: delete + recreate schema  (writes to live Weaviate)",
+      "type": "shell",
+      "command": "uv run python scripts/delete_knowledge_base.py --keep-schema",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+# Code owners are auto-requested for review on every PR.
+# Pair this with a branch ruleset that enables "Require review from Code Owners".
+# https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# If this repo ever moves under an organization, switch @Aalihaidar to a team
+# (e.g. @your-org/backend) so review load isn't tied to one account.
+
+*                       @Aalihaidar
+
+# Data contract + ingestion — review carefully, provenance rules apply.
+/data/                  @Aalihaidar
+/scripts/               @Aalihaidar
+
+# CI/CD, container, and repo policy.
+/.github/               @Aalihaidar
+/docker/                @Aalihaidar
+/pyproject.toml         @Aalihaidar
+/uv.lock                @Aalihaidar

@@ -1,0 +1,74 @@
+[project]
+name = "wagami-rag-en"
+version = "0.1.0"
+description = "Agentic RAG chatbot backend for a restaurant (English only, Weaviate + LangGraph)"
+readme = "README.md"
+requires-python = ">=3.14"  # matches the pinned devcontainer/Docker base image
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ali Haidar" }]
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
+    "langgraph>=1.2.11",
+    "langchain>=1.4.0",
+    "langchain-core>=1.6.2",  # keep in step with langchain 1.x
+    "langchain-google-genai>=4.4.0",
+    "weaviate-client>=4.23.1",  # 4.16+ for vector_config / Configure.Vectors; floored at the tested release
+    "cohere>=7.1.1",
+    "python-dotenv>=1.2.3",
+    "pydantic-settings>=2.15.0",
+    "gunicorn>=26.2.0",
+]
+# NOTE: no `langdetect` -- this corpus is English-only, so there is no
+# language-detection step anywhere in the retrieval path.
+# NOTE: no direct `setuptools` / `msgpack` -- nothing in the runtime tree
+# imports them; add back only with a comment naming the consumer if that
+# changes.
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.6",
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "httpx>=0.28.1",
+    "pre-commit>=4.6.2",
+    "pip-audit>=2.10.1",
+]
+notebook = [
+    "ipykernel>=7.3.0",
+]
+
+[tool.uv]
+default-groups = ["dev", "notebook"]
+# Phase 1 has no importable package (only scripts/ + data/). Keep uv from
+# building/installing this project into the env. Drop this line (default
+# becomes true) once app/ exists -- the [build-system] / hatch config below
+# is already set up for that.
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "N"]
+
+[tool.mypy]
+python_version = "3.14"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

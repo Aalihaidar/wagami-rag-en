@@ -1,0 +1,164 @@
+name: Build & Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      push_image:
+        description: "Push image to GHCR?"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      force_rebuild:
+        description: "Bypass layer cache (full rebuild)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least privilege at the top; the build job widens its own scopes below.
+permissions:
+  contents: read
+
+jobs:
+  # docker/Dockerfile.prod does not exist in Phase 1. Gate the build on it so
+  # this workflow no-ops cleanly until the production image is added.
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_prod_dockerfile: ${{ steps.check.outputs.has_prod_dockerfile }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: check
+        run: echo "has_prod_dockerfile=$([ -f docker/Dockerfile.prod ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    name: Build & Push Production Image
+    needs: detect
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write          # push image to GHCR
+      security-events: write   # upload Trivy SARIF
+      id-token: write          # keyless signing / provenance attestation
+    if: >
+      needs.detect.outputs.has_prod_dockerfile == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.workflow_run.conclusion == 'success')
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tags: ${{ steps.meta.outputs.tags }}
+      primary-tag: ${{ steps.meta.outputs.json && fromJSON(steps.meta.outputs.json).tags[0] }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags automatically lowercased)
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile.prod
+          platforms: linux/amd64,linux/arm64
+          push: >-
+            ${{
+              github.event_name != 'workflow_dispatch' ||
+              inputs.push_image == 'true'
+            }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          no-cache: ${{ inputs.force_rebuild == true }}
+          provenance: true
+          sbom: true
+
+      - name: Scan image for vulnerabilities
+        id: scan
+        if: steps.build.outcome == 'success'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+
+      - name: Upload Trivy results to Security tab
+        if: always() && steps.scan.outcome == 'success'
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Write job summary
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          {
+            echo "## 🐳 Production Image Build"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| **Image** | \`ghcr.io/${{ github.repository }}\` |"
+            echo "| **Digest** | \`${{ steps.build.outputs.digest }}\` |"
+            echo "| **Tags** | \`${{ steps.meta.outputs.tags }}\` |"
+            echo "| **Platforms** | \`linux/amd64, linux/arm64\` |"
+            echo "| **Commit** | \`${{ github.sha }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Trigger Render Deploy
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >
+      needs.build-and-push.result == 'success' &&
+      (github.event_name != 'workflow_dispatch' || inputs.push_image == 'true')
+    environment: production
+    steps:
+      - name: Call Render deploy hook
+        env:
+          DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$DEPLOY_HOOK" ]; then
+            echo "RENDER_DEPLOY_HOOK_URL not set — skipping deploy trigger."
+            exit 0
+          fi
+          curl -fsS --retry 3 --retry-delay 5 -X POST "$DEPLOY_HOOK"
