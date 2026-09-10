@@ -75,6 +75,7 @@
     "pyproject",
     "pytest",
     "repomix",
+    "usecwd",
     "uvicorn",
     "vectorizer",
     "wagami",
