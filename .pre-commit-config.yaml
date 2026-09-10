@@ -19,6 +19,13 @@ repos:
         # whatever a Windows editor happened to write.
         args: [--fix=lf]
 
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.8.1
+    hooks:
+      - id: nbstripout
+        # Notebooks under notebooks/ read .env -- never let cell outputs
+        # (cluster URL, key lengths, query results) reach a commit.
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.6  # keep in step with the ruff floor in pyproject.toml
     hooks:
