@@ -4,12 +4,10 @@
 Creates the KnowledgeBase collection (free-tier: 1 collection limit) and
 batch-imports knowledge_base.json.
 
-English-only menu corpus -- no `language` / `group_id` pairing fields, and
-no multilingual embedding model: the vectorizer defaults to Cohere's
-embed-english-v3.0, which is specialized for (and benchmarks better on)
-English-only retrieval than a multilingual model. `item_type` is kept and
-always set to "menu_item" for now so a future "faq" row type can be added
-without a schema migration.
+English-only menu + FAQ corpus -- no `language` / `group_id` pairing fields.
+The vectorizer is Cohere's embed-english-v3.0, its English-specialized
+embedding model. Every row carries an `item_type` of "menu_item" or "faq"
+on one shared schema.
 
 Uses the current (weaviate-client >=4.16) `vector_config` / `Configure.Vectors`
 API, not the deprecated `vectorizer_config` / `Configure.Vectorizer` path --
