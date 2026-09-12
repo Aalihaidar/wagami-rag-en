@@ -1,0 +1,31 @@
+# Line-ending policy for a repo that is edited on Windows and executed inside a
+# Linux container over the same bind mount, so both platforms read these exact
+# files. Git for Windows' installer default is core.autocrlf=true; without the
+# rules below that default commits CRLF, and a CRLF scripts/entrypoint.dev.sh
+# fails at container start with "bad interpreter: /bin/bash^M".
+#
+# This file is committed, so it applies to every clone, every teammate and CI.
+#
+# File modes are handled separately and do not need a setting here: tracked
+# files are 644 except scripts/*.sh at 755. The Windows drive is bind-mounted
+# into the container over 9p/DrvFs, which reports arbitrary exec bits, so this
+# checkout also carries core.filemode=false in .git/config to ignore them.
+# That is a per-checkout convenience only — the committed modes above are what
+# every other clone sees, so do not rely on it being set anywhere else.
+
+# === Default ===
+# Every tracked file here is text (the corpus and dish images under data/ are
+# gitignored). Store LF in the repo, check out LF in every working tree.
+# `text=auto` still runs Git's binary detection, so a binary added later is
+# left untouched rather than mangled.
+* text=auto eol=lf
+
+# === Explicit LF — these are consumed by the container's shell and toolchain ===
+*.sh         text eol=lf
+*.py         text eol=lf
+*.yml        text eol=lf
+*.yaml       text eol=lf
+*.toml       text eol=lf
+*.json       text eol=lf
+Dockerfile*  text eol=lf
+.env.example text eol=lf

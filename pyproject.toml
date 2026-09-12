@@ -39,6 +39,7 @@ dev = [
 ]
 notebook = [
     "ipykernel>=7.3.0",
+    "nbstripout>=0.8.1",  # strip cell outputs before commit -- notebooks are public, may touch .env
 ]
 
 [tool.uv]

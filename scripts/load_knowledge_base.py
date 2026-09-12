@@ -4,12 +4,10 @@
 Creates the KnowledgeBase collection (free-tier: 1 collection limit) and
 batch-imports knowledge_base.json.
 
-English-only menu corpus -- no `language` / `group_id` pairing fields, and
-no multilingual embedding model: the vectorizer defaults to Cohere's
-embed-english-v3.0, which is specialized for (and benchmarks better on)
-English-only retrieval than a multilingual model. `item_type` is kept and
-always set to "menu_item" for now so a future "faq" row type can be added
-without a schema migration.
+English-only menu + FAQ corpus -- no `language` / `group_id` pairing fields.
+The vectorizer is Cohere's embed-english-v3.0, its English-specialized
+embedding model. Every row carries an `item_type` of "menu_item" or "faq"
+on one shared schema.
 
 Uses the current (weaviate-client >=4.16) `vector_config` / `Configure.Vectors`
 API, not the deprecated `vectorizer_config` / `Configure.Vectorizer` path --
@@ -99,12 +97,11 @@ def create_collection(client: WeaviateClient) -> None:
                 data_type=wvc.DataType.TEXT_ARRAY,
                 skip_vectorization=True,
             ),
-            # --- price: real (menuspot.uk / instalacarte.com) vs. category-median
-            # estimate. price_source lets a caller distinguish the two -- see
-            # the Wagami corpus README's "Price" section for exactly which
-            # dishes are which and why.
+            # --- price: a single per-item GBP figure. Some rows were filled at
+            # transform time with a category-median estimate rather than a real
+            # scraped price; that per-row provenance is no longer tracked in the
+            # schema -- all prices are now treated the same.
             wvc.Property(name="price_gbp", data_type=wvc.DataType.NUMBER, skip_vectorization=True),
-            wvc.Property(name="price_source", data_type=wvc.DataType.TEXT, skip_vectorization=True),
             # --- nutrition: per-serving values only. Wagami's own data also
             # carries per-100g and %GDA for each of these, kept in the source
             # JSON but not promoted here -- these flat fields are for guest-
