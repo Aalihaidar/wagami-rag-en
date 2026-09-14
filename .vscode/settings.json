@@ -66,6 +66,7 @@
     "debugpy",
     "devcontainer",
     "dotenv",
+    "GROQ",
     "gunicorn",
     "gyoza",
     "Haidar",
