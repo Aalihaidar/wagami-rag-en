@@ -74,6 +74,12 @@ def create_collection(client: WeaviateClient) -> None:
     client.collections.create(
         name="KnowledgeBase",
         vector_config=vector_config,
+        # index_null_state=True: without it, a server-side filter for "this property is
+        # unset" (e.g. abv_percent IS NULL, for an alcohol-free search) fails at query time
+        # with "Nullstate must be indexed to be filterable" instead of just returning no
+        # matches -- found by 03_evaluation.ipynb exercising that filter end-to-end for the
+        # first time.
+        inverted_index_config=wvc.Configure.inverted_index(index_null_state=True),
         properties=[
             wvc.Property(
                 name="item_type",
