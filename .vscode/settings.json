@@ -92,6 +92,7 @@
     "uvicorn",
     "vectorizer",
     "wagami",
-    "weaviate"
+    "weaviate",
+    "yasai"
   ]
 }
