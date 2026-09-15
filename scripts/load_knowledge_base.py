@@ -103,10 +103,7 @@ def create_collection(client: WeaviateClient) -> None:
                 data_type=wvc.DataType.TEXT_ARRAY,
                 skip_vectorization=True,
             ),
-            # --- price: a single per-item GBP figure. Some rows were filled at
-            # transform time with a category-median estimate rather than a real
-            # scraped price; that per-row provenance is no longer tracked in the
-            # schema -- all prices are now treated the same.
+            # --- price: a single per-item GBP figure.
             wvc.Property(name="price_gbp", data_type=wvc.DataType.NUMBER, skip_vectorization=True),
             # --- nutrition: per-serving values only. Wagami's own data also
             # carries per-100g and %GDA for each of these, kept in the source
