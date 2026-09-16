@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "info"
 
+    # Section E's kill switch: flip to false via the platform's env store + a restart to take
+    # /chat offline immediately (a 503) without pushing/rebuilding a new deploy.
+    chat_enabled: bool = True
+
     weaviate_url: str = ""
     # Read-only key for the app's retrieval path -- never the admin key
     # scripts/ use to create/drop the collection and write objects.

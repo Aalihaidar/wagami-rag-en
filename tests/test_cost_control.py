@@ -1,6 +1,8 @@
 import datetime as dt
 from typing import Any
 
+import redis.exceptions
+
 from app.cost_control import is_over_spend_limit, record_token_usage
 
 
@@ -71,6 +73,36 @@ def test_daily_counter_does_not_leak_into_a_different_day() -> None:
         redis_client, daily_limit=1000, monthly_limit=10000, now=day_two
     )
     assert over_limit is False
+
+
+class UnreachableRedis:
+    """Simulates Redis being down -- every call raises, like a real redis-py ConnectionError."""
+
+    def get(self, key: str) -> int | None:
+        raise redis.exceptions.ConnectionError("simulated Redis outage")
+
+    def pipeline(self) -> UnreachableRedis:
+        return self
+
+    def incrby(self, key: str, amount: int) -> UnreachableRedis:
+        raise redis.exceptions.ConnectionError("simulated Redis outage")
+
+    def expire(self, key: str, ttl: int) -> UnreachableRedis:
+        return self
+
+    def execute(self) -> None:
+        raise redis.exceptions.ConnectionError("simulated Redis outage")
+
+
+def test_is_over_spend_limit_fails_open_when_redis_is_unreachable() -> None:
+    """Section E's graceful-degradation requirement: an unreachable Redis must not turn the
+    cost-control backstop into an outage of its own -- guests keep getting answered, bounded
+    only by the per-IP rate limit and concurrency cap until Redis comes back."""
+    assert is_over_spend_limit(UnreachableRedis(), daily_limit=1000, monthly_limit=10000) is False
+
+
+def test_record_token_usage_does_not_raise_when_redis_is_unreachable() -> None:
+    record_token_usage(UnreachableRedis(), 500)  # must not raise
 
 
 def test_rate_limiting_actually_enforces_the_configured_limit() -> None:

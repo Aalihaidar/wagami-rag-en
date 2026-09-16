@@ -24,7 +24,7 @@ from typing import Any, TypedDict, cast
 
 import weaviate
 from weaviate import WeaviateClient
-from weaviate.classes.init import Auth
+from weaviate.classes.init import AdditionalConfig, Auth, Timeout
 from weaviate.classes.query import Filter, FilterReturn, MetadataQuery
 from weaviate.collections import Collection
 
@@ -124,7 +124,13 @@ class SearchResult(TypedDict):
 
 
 def connect(settings: Settings) -> WeaviateClient:
-    """Connect to Weaviate Cloud with the read-only key -- never the admin key `scripts/` use."""
+    """Connect to Weaviate Cloud with the read-only key -- never the admin key `scripts/` use.
+
+    Explicit timeouts (Section E), not the client's own defaults: a query timeout short
+    enough that a stalled Weaviate call fails fast into app/main.py's outbound-error fallback
+    reply instead of tying up a chat turn (and a free-tier instance's one concurrency slot)
+    indefinitely. insert isn't relevant here (this app never writes), left at the default.
+    """
     header_name = (
         "X-OpenAI-Api-Key" if settings.embedding_provider == "openai" else "X-Cohere-Api-Key"
     )
@@ -132,6 +138,7 @@ def connect(settings: Settings) -> WeaviateClient:
         cluster_url=settings.weaviate_url,
         auth_credentials=Auth.api_key(settings.weaviate_read_api_key),
         headers={header_name: settings.embedding_api_key},
+        additional_config=AdditionalConfig(timeout=Timeout(init=5, query=15)),
     )
 
 
