@@ -97,7 +97,28 @@ def test_chat_request_rejects_unknown_fields() -> None:
                 "/chat", json={"session_id": "s1", "message": "hi", "model": "gpt-5"}
             )
         assert response.status_code == 422
+        # Section E: one {"error": "..."} JSON shape everywhere, not FastAPI's default
+        # {"detail": [...]} -- matching the shape slowapi's own RateLimitExceeded handler uses.
+        body = response.json()
+        assert body["error"] == "Invalid request."
+        assert isinstance(body["details"], list)
     finally:
+        app.dependency_overrides.pop(get_graph, None)
+        app.dependency_overrides.pop(get_redis_client, None)
+
+
+def test_chat_returns_503_with_consistent_error_shape_when_kill_switch_is_off() -> None:
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(main_module.settings, "chat_enabled", False)
+    app.dependency_overrides[get_graph] = lambda: object()
+    app.dependency_overrides[get_redis_client] = lambda: FakeRedis()
+    try:
+        with TestClient(app) as client:
+            response = client.post("/chat", json={"session_id": "s1", "message": "hi"})
+        assert response.status_code == 503
+        assert response.json() == {"error": "Chat is temporarily disabled."}
+    finally:
+        monkeypatch.undo()
         app.dependency_overrides.pop(get_graph, None)
         app.dependency_overrides.pop(get_redis_client, None)
 
@@ -223,6 +244,31 @@ def test_chat_returns_capacity_reply_once_daily_spend_limit_is_hit() -> None:
         assert response.status_code == 200
         assert response.json()["answer"] == CAPACITY_REPLY
         assert fake_graph.invoke_calls == []
+    finally:
+        app.dependency_overrides.pop(get_graph, None)
+        app.dependency_overrides.pop(get_redis_client, None)
+
+
+class FakeOutageGraph:
+    """A graph whose invoke() raises a transient outbound error -- e.g. Weaviate/Groq timing
+    out, or the Redis-backed checkpointer being unreachable."""
+
+    def get_state(self, config: dict[str, Any]) -> FakeStateSnapshot:
+        return FakeStateSnapshot({"history": []})
+
+    def invoke(self, input: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+        raise TimeoutError("simulated Weaviate/Groq timeout")
+
+
+def test_chat_degrades_to_a_fallback_reply_on_transient_outbound_failure() -> None:
+    fake_redis = FakeRedis()
+    app.dependency_overrides[get_graph] = lambda: FakeOutageGraph()
+    app.dependency_overrides[get_redis_client] = lambda: fake_redis
+    try:
+        with TestClient(app) as client:
+            response = client.post("/chat", json={"session_id": "s1", "message": "hi"})
+        assert response.status_code == 200
+        assert response.json()["answer"] == main_module.OUTBOUND_ERROR_REPLY
     finally:
         app.dependency_overrides.pop(get_graph, None)
         app.dependency_overrides.pop(get_redis_client, None)

@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -28,10 +30,15 @@ from app.cost_control import (
     is_over_spend_limit,
     record_token_usage,
 )
+from app.errors import OUTBOUND_ERROR_REPLY, TRANSIENT_OUTBOUND_ERRORS, register_exception_handlers
+from app.logging_config import configure_logging
 from app.retrieval import RetrievalTool, connect
 from app.schemas import ChatRequest, ChatResponse, CitedItem, SessionResponse
 
 settings = get_settings()
+configure_logging(settings.log_level)
+logger = logging.getLogger("app.main")
+access_logger = logging.getLogger("app.access")
 
 # Resolved relative to this file, not the caller's cwd -- same reasoning as
 # scripts/load_knowledge_base.py's own DATA_FILE.
@@ -84,6 +91,57 @@ app = FastAPI(
     redoc_url=None if settings.app_env == "production" else "/redoc",
     lifespan=lifespan,
 )
+
+# Section E: one {"error": "..."} JSON shape for every failure -- HTTPException, request
+# validation, and anything unhandled -- instead of an ad hoc shape per route.
+register_exception_handlers(app)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
+    """Section E's standard security response headers, applied to every route.
+
+    CSP is intentionally tight (no inline script, same-origin only) -- Section B's chat
+    frontend is a Jinja2 page + a separate vanilla-JS file, not inline <script>, so this
+    shouldn't need loosening when that lands; revisit only if it does.
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; frame-ancestors 'none'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'"
+    )
+    if settings.app_env == "production":
+        # Only meaningful over HTTPS, which is what production actually runs behind (Render);
+        # sending it in dev over plain HTTP would just be inert noise.
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    return response
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):  # type: ignore[no-untyped-def]
+    """Structured, PII-free access logging (Section E) -- method/path/status/duration/client
+    IP only, never the request body (so a guest's chat message is never logged)."""
+    start = time.monotonic()
+    response = await call_next(request)
+    duration_ms = (time.monotonic() - start) * 1000
+    access_logger.info(
+        "%s %s -> %d",
+        request.method,
+        request.url.path,
+        response.status_code,
+        extra={
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": round(duration_ms, 1),
+            "client_ip": request.client.host if request.client else None,
+        },
+    )
+    return response
+
 
 # Section D: per-IP request rate limit. storage_uri points at the same Redis so the limit
 # holds across multiple workers (a single in-process Limiter wouldn't); in_memory_fallback
@@ -189,22 +247,33 @@ def _run_chat_turn(
 
     Both caps are checked *before* graph.invoke() so a guest who's already hit one never
     reaches the LLM again for that turn (Section D's cost-control point).
+
+    Section E: graph.get_state()/graph.invoke() are the only calls that reach Weaviate, Cohere,
+    Groq, or the Redis-backed checkpointer -- a transient failure in any of them (timeout,
+    connection error, Redis unreachable) is caught here and degrades to one clear fallback
+    reply instead of a raw 500. A non-transient exception (a real bug) still propagates, to be
+    caught by app/errors.py's generic handler and logged as an actual error.
     """
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
 
-    snapshot = graph.get_state(config)
-    history = (snapshot.values or {}).get("history", [])
-    if len(history) >= settings.max_conversation_turns:
-        return CONVERSATION_LIMIT_REPLY, []
+    try:
+        snapshot = graph.get_state(config)
+        history = (snapshot.values or {}).get("history", [])
+        if len(history) >= settings.max_conversation_turns:
+            return CONVERSATION_LIMIT_REPLY, []
 
-    if is_over_spend_limit(
-        redis_client,
-        daily_limit=settings.daily_token_limit,
-        monthly_limit=settings.monthly_token_limit,
-    ):
-        return CAPACITY_REPLY, []
+        if is_over_spend_limit(
+            redis_client,
+            daily_limit=settings.daily_token_limit,
+            monthly_limit=settings.monthly_token_limit,
+        ):
+            return CAPACITY_REPLY, []
 
-    final_state = graph.invoke({"question": message}, config=config)
+        final_state = graph.invoke({"question": message}, config=config)
+    except TRANSIENT_OUTBOUND_ERRORS:
+        logger.exception("Outbound service failure during a /chat turn")
+        return OUTBOUND_ERROR_REPLY, []
+
     record_token_usage(redis_client, final_state["usage"]["total_tokens"])
     return final_state["answer"], cited_items_from_ranked(final_state["search_result"]["ranked"])
 
@@ -217,6 +286,8 @@ async def chat(
     graph: CompiledStateGraph = Depends(get_graph),
     redis_client: Redis = Depends(get_redis_client),
 ) -> ChatResponse:
+    if not settings.chat_enabled:
+        raise HTTPException(status_code=503, detail="Chat is temporarily disabled.")
     if not await _try_acquire_chat_slot():
         raise HTTPException(status_code=503, detail="Server busy, please try again shortly.")
     try:

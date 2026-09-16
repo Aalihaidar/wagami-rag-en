@@ -8,7 +8,12 @@ regularly (Section 3) -- this is a backstop, not a substitute.
 """
 
 import datetime as dt
+import logging
 from typing import Any
+
+import redis.exceptions
+
+logger = logging.getLogger("app.cost_control")
 
 CONVERSATION_LIMIT_REPLY = (
     "This conversation has gotten pretty long! Please start a new chat so I can keep giving "
@@ -50,25 +55,46 @@ def is_over_spend_limit(
     Checked before graph.invoke() -- this can only block calls made *after* the one that
     pushed the counter over the limit, not that call itself, which is the standard shape of
     this kind of soft circuit breaker.
+
+    Fails open (returns False) if Redis itself is unreachable (Section E's graceful-
+    degradation requirement) -- the per-IP rate limit and concurrency cap still bound cost
+    without this backstop, so refusing every guest because the spend counter can't be read
+    would be a worse outcome than temporarily losing the backstop itself.
     """
     now = now or dt.datetime.now(dt.UTC)
-    daily = int(redis_client.get(_daily_key(now)) or 0)
-    monthly = int(redis_client.get(_monthly_key(now)) or 0)
+    try:
+        daily = int(redis_client.get(_daily_key(now)) or 0)
+        monthly = int(redis_client.get(_monthly_key(now)) or 0)
+    except redis.exceptions.RedisError:
+        logger.warning(
+            "Redis unreachable while checking spend limit -- failing open", exc_info=True
+        )
+        return False
     return daily >= daily_limit or monthly >= monthly_limit
 
 
 def record_token_usage(
     redis_client: Any, total_tokens: int, *, now: dt.datetime | None = None
 ) -> None:
-    """Add total_tokens to today's/this month's running counters."""
+    """Add total_tokens to today's/this month's running counters.
+
+    Fails open (swallows the error) if Redis is unreachable -- same reasoning as
+    is_over_spend_limit above: this turn's usage silently goes uncounted rather than the
+    guest's already-answered turn turning into a 500.
+    """
     if total_tokens <= 0:
         return
     now = now or dt.datetime.now(dt.UTC)
     daily_key = _daily_key(now)
     monthly_key = _monthly_key(now)
-    pipe = redis_client.pipeline()
-    pipe.incrby(daily_key, total_tokens)
-    pipe.expire(daily_key, _DAILY_KEY_TTL_SECONDS)
-    pipe.incrby(monthly_key, total_tokens)
-    pipe.expire(monthly_key, _MONTHLY_KEY_TTL_SECONDS)
-    pipe.execute()
+    try:
+        pipe = redis_client.pipeline()
+        pipe.incrby(daily_key, total_tokens)
+        pipe.expire(daily_key, _DAILY_KEY_TTL_SECONDS)
+        pipe.incrby(monthly_key, total_tokens)
+        pipe.expire(monthly_key, _MONTHLY_KEY_TTL_SECONDS)
+        pipe.execute()
+    except redis.exceptions.RedisError:
+        logger.warning(
+            "Redis unreachable while recording token usage -- usage not counted", exc_info=True
+        )
