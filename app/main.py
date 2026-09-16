@@ -70,9 +70,14 @@ app = FastAPI(
 )
 
 # Section 4's image-hosting choice: serve data/images/ from this same service rather than
-# standing up separate object storage. check_dir=False so a checkout without the
-# (gitignored, local-only) data/ corpus still starts -- image requests just 404 instead.
-app.mount("/images", StaticFiles(directory=IMAGES_DIR, check_dir=False), name="images")
+# standing up separate object storage. StaticFiles re-checks the directory on every
+# request (not just at mount time), so check_dir=False alone doesn't survive a checkout
+# without the (gitignored, local-only) data/ corpus -- it defers the crash from startup to
+# the first image request instead of preventing it. Guarantee the directory actually exists
+# (possibly empty) instead: missing files then 404 normally, the corpus's own README/data
+# provenance still governs whether real images ever land here.
+IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
 
 
 @app.get("/healthz")
