@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -8,14 +9,25 @@ from fastapi.staticfiles import StaticFiles
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
+from redis import Redis
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from starlette.concurrency import run_in_threadpool
 
 from app.agent.checkpointer import build_checkpointer
+from app.agent.generation import CitedItem as GeneratedCitedItem
 from app.agent.generation import cited_items_from_ranked
 from app.agent.graph import build_graph
 from app.agent.llm import GroqClient
 from app.agent.understanding import load_category_index
 from app.config import get_settings
+from app.cost_control import (
+    CAPACITY_REPLY,
+    CONVERSATION_LIMIT_REPLY,
+    is_over_spend_limit,
+    record_token_usage,
+)
 from app.retrieval import RetrievalTool, connect
 from app.schemas import ChatRequest, ChatResponse, CitedItem, SessionResponse
 
@@ -37,16 +49,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     app.state.graph = None
     app.state.checkpointer = None
+    app.state.redis_client = None
     if not (settings.weaviate_url and settings.weaviate_read_api_key):
         yield
         return
 
     weaviate_client = connect(settings)
+    redis_client = Redis.from_url(settings.redis_url)
     try:
         kb = weaviate_client.collections.get("KnowledgeBase")
         retrieval_tool = RetrievalTool(kb=kb, cohere_api_key=settings.embedding_api_key)
         category_index = load_category_index(kb)
         groq_client = GroqClient(settings.groq_api_key) if settings.groq_api_key else None
+        app.state.redis_client = redis_client
         with build_checkpointer(settings.redis_url) as checkpointer:
             app.state.checkpointer = checkpointer
             app.state.graph = build_graph(
@@ -60,6 +75,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             yield
     finally:
         weaviate_client.close()
+        redis_client.close()
 
 
 app = FastAPI(
@@ -68,6 +84,55 @@ app = FastAPI(
     redoc_url=None if settings.app_env == "production" else "/redoc",
     lifespan=lifespan,
 )
+
+# Section D: per-IP request rate limit. storage_uri points at the same Redis so the limit
+# holds across multiple workers (a single in-process Limiter wouldn't); in_memory_fallback
+# keeps /chat self-protected (imperfectly, per-process) rather than fully unprotected if
+# Redis has a hiccup, per slowapi's own documented fallback mechanism.
+CHAT_RATE_LIMIT = "10/minute"  # per guest IP -- tune to actual guest traffic once observed
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=settings.redis_url,
+    in_memory_fallback_enabled=True,
+    in_memory_fallback=[CHAT_RATE_LIMIT],
+)
+app.state.limiter = limiter
+# slowapi's handler is typed for RateLimitExceeded specifically, narrower than Starlette's
+# generic Exception handler signature -- safe at runtime (Starlette dispatches by the
+# registered exception class), just not variance-compatible for mypy.
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+
+# Section D: a cap on total concurrent /chat work in flight, sized to a small free-tier
+# instance's CPU/RAM -- the per-IP rate limit above bounds one guest's volume, this bounds
+# total load from every guest combined. Rejects immediately (503) rather than queuing
+# guests indefinitely behind a slow instance.
+#
+# Not asyncio.Semaphore: asyncio.wait_for(semaphore.acquire(), timeout=0) is unreliable for
+# a non-blocking "try acquire, else reject" check -- a zero timeout can fire before the
+# acquire's fast path (plenty of capacity, no real wait) gets a chance to run, so it can
+# spuriously report "busy" even with free slots (confirmed directly: 3/3 spurious timeouts
+# against a fresh Semaphore(4) with nothing else running). A plain counter + lock has no
+# such race.
+MAX_CONCURRENT_CHAT_REQUESTS = 4
+_chat_slots_in_use = 0
+_chat_slots_lock = asyncio.Lock()
+
+
+async def _try_acquire_chat_slot() -> bool:
+    global _chat_slots_in_use
+    async with _chat_slots_lock:
+        if _chat_slots_in_use >= MAX_CONCURRENT_CHAT_REQUESTS:
+            return False
+        _chat_slots_in_use += 1
+        return True
+
+
+async def _release_chat_slot() -> None:
+    global _chat_slots_in_use
+    async with _chat_slots_lock:
+        _chat_slots_in_use -= 1
+
 
 # Section 4's image-hosting choice: serve data/images/ from this same service rather than
 # standing up separate object storage. StaticFiles re-checks the directory on every
@@ -99,26 +164,70 @@ def get_checkpointer(request: Request) -> BaseCheckpointSaver:
     return checkpointer
 
 
+def get_redis_client(request: Request) -> Redis:
+    redis_client = request.app.state.redis_client
+    if redis_client is None:
+        raise HTTPException(status_code=503, detail="Chat is not configured")
+    return redis_client
+
+
 def _image_url(filename: str) -> str:
     if not settings.image_base_url:
         return filename
     return f"{settings.image_base_url.rstrip('/')}/{filename}"
 
 
+def _run_chat_turn(
+    graph: CompiledStateGraph,
+    redis_client: Redis,
+    session_id: str,
+    message: str,
+) -> tuple[str, list[GeneratedCitedItem]]:
+    """The blocking part of a /chat turn: conversation-cap and spend-cap checks, the graph
+    invocation itself, and recording token usage -- run in one threadpool hop (Section A)
+    so none of it blocks the event loop.
+
+    Both caps are checked *before* graph.invoke() so a guest who's already hit one never
+    reaches the LLM again for that turn (Section D's cost-control point).
+    """
+    config: RunnableConfig = {"configurable": {"thread_id": session_id}}
+
+    snapshot = graph.get_state(config)
+    history = (snapshot.values or {}).get("history", [])
+    if len(history) >= settings.max_conversation_turns:
+        return CONVERSATION_LIMIT_REPLY, []
+
+    if is_over_spend_limit(
+        redis_client,
+        daily_limit=settings.daily_token_limit,
+        monthly_limit=settings.monthly_token_limit,
+    ):
+        return CAPACITY_REPLY, []
+
+    final_state = graph.invoke({"question": message}, config=config)
+    record_token_usage(redis_client, final_state["usage"]["total_tokens"])
+    return final_state["answer"], cited_items_from_ranked(final_state["search_result"]["ranked"])
+
+
 @app.post("/chat", response_model=ChatResponse)
+@limiter.limit(CHAT_RATE_LIMIT)
 async def chat(
-    payload: ChatRequest, graph: CompiledStateGraph = Depends(get_graph)
+    request: Request,
+    payload: ChatRequest,
+    graph: CompiledStateGraph = Depends(get_graph),
+    redis_client: Redis = Depends(get_redis_client),
 ) -> ChatResponse:
-    config: RunnableConfig = {"configurable": {"thread_id": payload.session_id}}
-    # graph.invoke() makes blocking Weaviate/Cohere/Groq HTTP calls -- run it off the event
-    # loop so one slow guest turn can't stall every other request on this single instance.
-    final_state = await run_in_threadpool(
-        graph.invoke, {"question": payload.message}, config=config
-    )
-    cited = cited_items_from_ranked(final_state["search_result"]["ranked"])
+    if not await _try_acquire_chat_slot():
+        raise HTTPException(status_code=503, detail="Server busy, please try again shortly.")
+    try:
+        answer, cited = await run_in_threadpool(
+            _run_chat_turn, graph, redis_client, payload.session_id, payload.message
+        )
+    finally:
+        await _release_chat_slot()
     return ChatResponse(
         session_id=payload.session_id,
-        answer=final_state["answer"],
+        answer=answer,
         cited_items=[
             CitedItem(id=item["id"], slug=item["slug"], image=_image_url(item["image"]))
             for item in cited

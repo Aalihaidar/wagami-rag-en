@@ -3,6 +3,12 @@ from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.cost_control import (
+    DAILY_TOKEN_LIMIT_DEFAULT,
+    MAX_CONVERSATION_TURNS_DEFAULT,
+    MONTHLY_TOKEN_LIMIT_DEFAULT,
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -36,6 +42,11 @@ class Settings(BaseSettings):
     # Base URL a knowledge_base row's `image` filename is appended to when building a
     # /chat response's cited items. Empty (default) leaves cited images as bare filenames.
     image_base_url: str = ""
+
+    # Section D (rate limiting & cost control) -- tune to your actual budget/provider limits.
+    daily_token_limit: int = DAILY_TOKEN_LIMIT_DEFAULT
+    monthly_token_limit: int = MONTHLY_TOKEN_LIMIT_DEFAULT
+    max_conversation_turns: int = MAX_CONVERSATION_TURNS_DEFAULT
 
 
 @lru_cache

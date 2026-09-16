@@ -1,3 +1,4 @@
+import datetime as dt
 from typing import Any
 
 import pytest
@@ -5,7 +6,8 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.config import Settings
-from app.main import app, get_checkpointer, get_graph
+from app.cost_control import CAPACITY_REPLY, CONVERSATION_LIMIT_REPLY, _daily_key
+from app.main import app, get_checkpointer, get_graph, get_redis_client
 
 
 @pytest.fixture(autouse=True)
@@ -13,18 +15,48 @@ def _unconfigured_settings(monkeypatch: Any) -> None:
     """Force lifespan's skip-real-connections branch regardless of this dev machine's own
     .env (which has real Weaviate/Cohere/Redis credentials for local manual testing) --
     every test here exercises only the HTTP layer, via dependency_overrides for the graph/
-    checkpointer, and must never make a real outbound call."""
+    checkpointer/redis client, and must never make a real outbound call."""
     monkeypatch.setattr(
         main_module,
         "settings",
         Settings(weaviate_url="", weaviate_read_api_key="", image_base_url=""),
     )
+    # The module-level `limiter` was already constructed at import time against whatever
+    # REDIS_URL was ambient then -- disabling it (slowapi's own documented mechanism) means
+    # its check short-circuits before ever touching storage, so no test needs a real Redis
+    # just to reach the rate limiter.
+    monkeypatch.setattr(main_module.limiter, "enabled", False)
+
+
+class FakeRedis:
+    """Minimal stand-in for redis.Redis -- just enough for app.cost_control's counter
+    reads/writes, with no real Redis needed."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, int] = {}
+
+    def get(self, key: str) -> int | None:
+        return self.store.get(key)
+
+    def pipeline(self) -> FakeRedis:
+        return self
+
+    def incrby(self, key: str, amount: int) -> FakeRedis:
+        self.store[key] = self.store.get(key, 0) + amount
+        return self
+
+    def expire(self, key: str, ttl: int) -> FakeRedis:
+        return self
+
+    def execute(self) -> None:
+        pass
 
 
 def test_lifespan_skips_real_connections_when_weaviate_unconfigured() -> None:
     with TestClient(app):
         assert app.state.graph is None
         assert app.state.checkpointer is None
+        assert app.state.redis_client is None
 
 
 def test_healthz_unaffected_by_lifespan() -> None:
@@ -54,10 +86,11 @@ def test_create_session_returns_a_session_id() -> None:
 
 
 def test_chat_request_rejects_unknown_fields() -> None:
-    # Override get_graph so a 503 (unconfigured chat) can't mask the 422 this test is
-    # actually checking for -- FastAPI's dependency solving can raise before body
-    # validation runs, and a real deployment would have get_graph succeed here.
+    # Override get_graph/get_redis_client so a 503 (unconfigured chat) can't mask the 422
+    # this test is actually checking for -- FastAPI's dependency solving can raise before
+    # body validation runs, and a real deployment would have both dependencies succeed here.
     app.dependency_overrides[get_graph] = lambda: object()
+    app.dependency_overrides[get_redis_client] = lambda: FakeRedis()
     try:
         with TestClient(app) as client:
             response = client.post(
@@ -66,6 +99,7 @@ def test_chat_request_rejects_unknown_fields() -> None:
         assert response.status_code == 422
     finally:
         app.dependency_overrides.pop(get_graph, None)
+        app.dependency_overrides.pop(get_redis_client, None)
 
 
 def test_images_route_404s_for_a_missing_file() -> None:
@@ -75,31 +109,42 @@ def test_images_route_404s_for_a_missing_file() -> None:
 
 
 def test_chat_request_rejects_an_overlong_message() -> None:
-    # Same get_graph override reasoning as test_chat_request_rejects_unknown_fields above --
-    # a 503 (unconfigured chat) can otherwise preempt the 422 this test checks for.
     app.dependency_overrides[get_graph] = lambda: object()
+    app.dependency_overrides[get_redis_client] = lambda: FakeRedis()
     try:
         with TestClient(app) as client:
             response = client.post("/chat", json={"session_id": "s1", "message": "x" * 501})
         assert response.status_code == 422
     finally:
         app.dependency_overrides.pop(get_graph, None)
+        app.dependency_overrides.pop(get_redis_client, None)
 
 
 def test_chat_request_rejects_an_empty_message() -> None:
     app.dependency_overrides[get_graph] = lambda: object()
+    app.dependency_overrides[get_redis_client] = lambda: FakeRedis()
     try:
         with TestClient(app) as client:
             response = client.post("/chat", json={"session_id": "s1", "message": ""})
         assert response.status_code == 422
     finally:
         app.dependency_overrides.pop(get_graph, None)
+        app.dependency_overrides.pop(get_redis_client, None)
+
+
+class FakeStateSnapshot:
+    def __init__(self, values: dict[str, Any]) -> None:
+        self.values = values
 
 
 class FakeGraph:
-    def __init__(self, final_state: dict[str, Any]) -> None:
+    def __init__(self, final_state: dict[str, Any], *, history: list[Any] | None = None) -> None:
         self._final_state = final_state
+        self._history = history or []
         self.invoke_calls: list[dict[str, Any]] = []
+
+    def get_state(self, config: dict[str, Any]) -> FakeStateSnapshot:
+        return FakeStateSnapshot({"history": self._history})
 
     def invoke(self, input: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         self.invoke_calls.append({"input": input, "config": config})
@@ -109,6 +154,7 @@ class FakeGraph:
 def test_chat_returns_answer_and_cited_items_with_overridden_graph() -> None:
     final_state = {
         "answer": "Our vegan ramen is £9.50.",
+        "usage": {"total_tokens": 42},
         "search_result": {
             "ranked": [
                 {
@@ -128,7 +174,9 @@ def test_chat_returns_answer_and_cited_items_with_overridden_graph() -> None:
         },
     }
     fake_graph = FakeGraph(final_state)
+    fake_redis = FakeRedis()
     app.dependency_overrides[get_graph] = lambda: fake_graph
+    app.dependency_overrides[get_redis_client] = lambda: fake_redis
     try:
         with TestClient(app) as client:
             response = client.post("/chat", json={"session_id": "s1", "message": "vegan ramen"})
@@ -140,8 +188,44 @@ def test_chat_returns_answer_and_cited_items_with_overridden_graph() -> None:
             {"id": "abc-123", "slug": "vegan-ramen", "image": "vegan-ramen.png"}
         ]
         assert fake_graph.invoke_calls[0]["config"] == {"configurable": {"thread_id": "s1"}}
+        assert fake_redis.store  # token usage was recorded
     finally:
         app.dependency_overrides.pop(get_graph, None)
+        app.dependency_overrides.pop(get_redis_client, None)
+
+
+def test_chat_returns_a_fixed_reply_once_conversation_turn_cap_is_hit() -> None:
+    long_history = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(50)]
+    fake_graph = FakeGraph({"answer": "unused", "usage": {"total_tokens": 0}}, history=long_history)
+    fake_redis = FakeRedis()
+    app.dependency_overrides[get_graph] = lambda: fake_graph
+    app.dependency_overrides[get_redis_client] = lambda: fake_redis
+    try:
+        with TestClient(app) as client:
+            response = client.post("/chat", json={"session_id": "s1", "message": "hi again"})
+        assert response.status_code == 200
+        assert response.json()["answer"] == CONVERSATION_LIMIT_REPLY
+        assert fake_graph.invoke_calls == []  # never reached the LLM
+    finally:
+        app.dependency_overrides.pop(get_graph, None)
+        app.dependency_overrides.pop(get_redis_client, None)
+
+
+def test_chat_returns_capacity_reply_once_daily_spend_limit_is_hit() -> None:
+    fake_graph = FakeGraph({"answer": "unused", "usage": {"total_tokens": 0}})
+    fake_redis = FakeRedis()
+    fake_redis.store[_daily_key(dt.datetime.now(dt.UTC))] = 10_000_000  # far over any default
+    app.dependency_overrides[get_graph] = lambda: fake_graph
+    app.dependency_overrides[get_redis_client] = lambda: fake_redis
+    try:
+        with TestClient(app) as client:
+            response = client.post("/chat", json={"session_id": "s1", "message": "hi"})
+        assert response.status_code == 200
+        assert response.json()["answer"] == CAPACITY_REPLY
+        assert fake_graph.invoke_calls == []
+    finally:
+        app.dependency_overrides.pop(get_graph, None)
+        app.dependency_overrides.pop(get_redis_client, None)
 
 
 class FakeCheckpointer:
