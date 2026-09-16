@@ -32,6 +32,7 @@ from app.config import Settings
 
 FIELDS = [
     "name",
+    "slug",
     "category",
     "item_type",
     "description",
@@ -44,6 +45,7 @@ FIELDS = [
     "allergens_may_contain",
     "is_gluten_free_listed",
     "embedding_text",
+    "image",
 ]
 
 ALPHA = 0.75

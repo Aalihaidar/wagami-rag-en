@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # Redis Stack, not plain Redis (see docker-compose.yml's redis service comment).
     redis_url: str = "redis://redis:6379/0"
 
+    # Base URL a knowledge_base row's `image` filename is appended to when building a
+    # /chat response's cited items. Empty (default) leaves cited images as bare filenames.
+    image_base_url: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

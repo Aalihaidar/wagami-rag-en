@@ -49,6 +49,12 @@ target-version = "py314"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "N"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's own required pattern (Depends()/Query()/... in a route's default args) --
+# B008 exists to catch a real footgun (a mutable default evaluated once at def time), but
+# these calls are meant to run at request time and FastAPI relies on the call being there.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Body"]
+
 [tool.mypy]
 python_version = "3.14"
 plugins = ["pydantic.mypy"]

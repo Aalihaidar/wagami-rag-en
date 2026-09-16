@@ -5,6 +5,8 @@ in build_user_prompt() below (see docs/APP_AND_DEPLOYMENT_PLAN.md's LLM-provider
 why this specific notebook is the verified porting source).
 """
 
+from typing import TypedDict
+
 from app.retrieval import ExcludedTopMatch, MenuRow, RerankHit, pbool, plist, pnum, pstr
 
 MENU_TONE = (
@@ -92,6 +94,33 @@ def build_context(ranked: list[RerankHit]) -> str:
     if not ranked:
         return "(no matching rows retrieved)"
     return "\n".join(format_row(h["row"]) for h in ranked)
+
+
+class CitedItem(TypedDict):
+    id: str
+    slug: str
+    image: str
+
+
+def cited_items_from_ranked(ranked: list[RerankHit]) -> list[CitedItem]:
+    """Menu items from CONTEXT worth showing the guest a thumbnail for.
+
+    First cut, not from a verified notebook: every CONTEXT menu row with an image, not just
+    the ones the model's prose actually ends up mentioning -- the generation call returns
+    free text only, with no structured per-row citation, so there's no cheaper way yet to
+    know which rows it actually used. Revisit if this over-shows images in practice (e.g. a
+    reply about one dish still surfacing thumbnails for five reranked candidates).
+    """
+    items: list[CitedItem] = []
+    for hit in ranked:
+        row = hit["row"]
+        if pstr(row, "item_type") != "menu_item":
+            continue
+        image = pstr(row, "image")
+        if not image:
+            continue
+        items.append({"id": row["uuid"], "slug": pstr(row, "slug"), "image": image})
+    return items
 
 
 def build_user_prompt(
