@@ -5,6 +5,12 @@ as LangGraph nodes so app/'s FastAPI layer can invoke one compiled graph per gue
 (via `checkpointer`) resume it with prior-turn memory -- see app/agent/checkpointer.py and
 app/agent/memory.py. The multi-turn history mechanism is new, additive code, not part of the
 verified single-turn notebook pipeline; see app/agent/memory.py's own docstring.
+
+Design invariant (Section 3 of the app/deployment plan): this graph has exactly the four
+nodes below and no write-capable tools -- it cannot place orders, modify data, or call
+anything beyond read-only retrieval, so there is no "high-risk agent action" surface that
+would need human-in-the-loop approval. If a future feature ever adds a write-capable tool
+(order placement, reservation booking), re-read that whole section before shipping it.
 """
 
 import operator
@@ -16,8 +22,10 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.agent.generation import (
     GENERATION_SYSTEM_PROMPT,
+    SAFE_FALLBACK_REPLY,
     build_context,
     build_user_prompt,
+    contains_system_prompt_leak,
     temperature_for,
     tone_for,
 )
@@ -123,6 +131,10 @@ def build_graph(
             )
             reply = gen["text"]
             gen_usage = gen["usage"]
+            # Output-side check (Section 3): defense-in-depth behind the system prompt's own
+            # "never reveal yourself" instruction, not a replacement for it.
+            if contains_system_prompt_leak(state["system_prompt"], reply):
+                reply = SAFE_FALLBACK_REPLY
         usage = {
             "understand": understand_usage,
             "generate": gen_usage,
