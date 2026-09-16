@@ -74,6 +74,28 @@ def test_images_route_404s_for_a_missing_file() -> None:
         assert response.status_code == 404
 
 
+def test_chat_request_rejects_an_overlong_message() -> None:
+    # Same get_graph override reasoning as test_chat_request_rejects_unknown_fields above --
+    # a 503 (unconfigured chat) can otherwise preempt the 422 this test checks for.
+    app.dependency_overrides[get_graph] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            response = client.post("/chat", json={"session_id": "s1", "message": "x" * 501})
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.pop(get_graph, None)
+
+
+def test_chat_request_rejects_an_empty_message() -> None:
+    app.dependency_overrides[get_graph] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            response = client.post("/chat", json={"session_id": "s1", "message": ""})
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.pop(get_graph, None)
+
+
 class FakeGraph:
     def __init__(self, final_state: dict[str, Any]) -> None:
         self._final_state = final_state
