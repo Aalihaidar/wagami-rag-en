@@ -100,8 +100,18 @@ def load_category_index(kb: Any) -> CategoryIndex:
         if isinstance(path, list) and len(path) >= 2 and isinstance(path[0], str):
             parent_groups.setdefault(path[0], set()).add(category)
 
+    # Sibling expansion is a course-type feature (bao buns / gyoza / lighter bites / big
+    # flavour bites are all genuinely interchangeable "starter"-type dishes under one parent)
+    # -- excluded here for "drinks" specifically, since its sub-categories (coffee + tea,
+    # wine + sake, beers + cider, cocktails, soft drinks, freshly made juices) are mutually
+    # exclusive drink TYPES, not synonyms. Found live: "is there coffee?" expanded
+    # category_hint to all six adult-beverage categories, diluting both retrieval and the
+    # rerank query text badly enough that every genuine coffee/tea row lost to unrelated
+    # wine/juice/cider rows that merely happened to have richer description text.
     siblings: dict[str, set[str]] = {}
-    for group in parent_groups.values():
+    for parent, group in parent_groups.items():
+        if parent == "drinks":
+            continue
         for leaf in group:
             siblings[leaf] = group
 
