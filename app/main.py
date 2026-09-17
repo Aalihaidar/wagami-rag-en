@@ -318,7 +318,9 @@ def _run_chat_turn(
         return OUTBOUND_ERROR_REPLY, []
 
     record_token_usage(redis_client, final_state["usage"]["total_tokens"])
-    return final_state["answer"], cited_items_from_ranked(final_state["search_result"]["ranked"])
+    answer = final_state["answer"]
+    cited_slugs = final_state.get("cited_slugs", [])
+    return answer, cited_items_from_ranked(final_state["search_result"]["ranked"], cited_slugs)
 
 
 @app.post("/chat", response_model=ChatResponse)
