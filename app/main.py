@@ -5,9 +5,12 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
@@ -43,6 +46,24 @@ access_logger = logging.getLogger("app.access")
 # Resolved relative to this file, not the caller's cwd -- same reasoning as
 # scripts/load_knowledge_base.py's own DATA_FILE.
 IMAGES_DIR = Path(__file__).resolve().parent.parent / "data" / "images"
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
+# Cache-busts /static/* on every process restart (a Render redeploy gets a fresh process) --
+# simplest possible fix for browsers caching a stale chat.js/chat.css after a deploy, with no
+# build step to compute a real content hash from.
+STATIC_VERSION = str(int(time.time()))
+
+# When IMAGE_BASE_URL points at external storage (e.g. a Cloudflare R2 bucket) rather than
+# this service's own /images route, the CSP's img-src must allow that origin explicitly --
+# derived from the setting itself so the two can never drift out of sync.
+_image_base_origin = urlparse(settings.image_base_url)
+CSP_IMG_SRC = (
+    f"img-src 'self' data: {_image_base_origin.scheme}://{_image_base_origin.netloc}"
+    if _image_base_origin.scheme in ("http", "https")
+    else "img-src 'self' data:"
+)
 
 
 @asynccontextmanager
@@ -101,17 +122,19 @@ register_exception_handlers(app)
 async def security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
     """Section E's standard security response headers, applied to every route.
 
-    CSP is intentionally tight (no inline script, same-origin only) -- Section B's chat
-    frontend is a Jinja2 page + a separate vanilla-JS file, not inline <script>, so this
-    shouldn't need loosening when that lands; revisit only if it does.
+    CSP is intentionally tight (no inline script or style) -- Section B's chat frontend loads
+    its JS/CSS from /static as separate files and never sets an inline `style="..."` attribute,
+    so nothing here needed loosening once that landed. img-src additionally allows
+    IMAGE_BASE_URL's own origin (see CSP_IMG_SRC above) when it points at external storage
+    instead of this service's own /images route. Revisit only if a future change actually
+    needs an inline script/style or another cross-origin resource.
     """
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; frame-ancestors 'none'; img-src 'self' data:; "
-        "style-src 'self' 'unsafe-inline'"
+        f"default-src 'self'; frame-ancestors 'none'; {CSP_IMG_SRC}; style-src 'self'"
     )
     if settings.app_env == "production":
         # Only meaningful over HTTPS, which is what production actually runs behind (Render);
@@ -201,11 +224,31 @@ async def _release_chat_slot() -> None:
 # provenance still governs whether real images ever land here.
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def chat_page(request: Request) -> HTMLResponse:
+    """Section B: the guest-facing chat page itself -- one server-rendered Jinja2 template,
+    all interactivity (session lifecycle, sending messages, images) driven by /static/js/chat.js
+    calling this same service's own /session and /chat endpoints."""
+    return templates.TemplateResponse(
+        request,
+        "chat.html",
+        {
+            "title": "Menu & FAQ Assistant",
+            "meta_description": (
+                "Ask a demo restaurant chatbot about menu items, prices, nutrition, "
+                "allergens, or FAQs."
+            ),
+            "static_version": STATIC_VERSION,
+        },
+    )
 
 
 def get_graph(request: Request) -> CompiledStateGraph:
@@ -300,7 +343,15 @@ async def chat(
         session_id=payload.session_id,
         answer=answer,
         cited_items=[
-            CitedItem(id=item["id"], slug=item["slug"], image=_image_url(item["image"]))
+            CitedItem(
+                id=item["id"],
+                slug=item["slug"],
+                name=item["name"],
+                description=item["description"],
+                ingredients=item["ingredients"],
+                price_gbp=item["price_gbp"],
+                image=_image_url(item["image"]),
+            )
             for item in cited
         ],
     )

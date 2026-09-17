@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Any
 
 from app.agent.llm import LLMResponse, Usage
@@ -6,6 +7,7 @@ from app.agent.understanding import (
     CategoryIndex,
     build_response_schema,
     build_understand_system_prompt,
+    load_category_index,
     understand_query,
 )
 
@@ -31,6 +33,63 @@ class FakeGroqClient:
         self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt, **kwargs})
         usage: Usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
         return {"text": self._text, "usage": usage}
+
+
+class FakeCategoryKB:
+    """Stands in for the Weaviate collection's .iterator() -- load_category_index() only
+    reads return_properties off each row's .properties, per its own docstring."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def iterator(self, return_properties: list[str]) -> list[Any]:
+        return [SimpleNamespace(properties=row) for row in self._rows]
+
+
+def test_load_category_index_does_not_expand_drinks_siblings() -> None:
+    """Regression test for a live bug: "is there coffee?" expanded category_hint to all six
+    adult-beverage categories (coffee + tea, wine + sake, beers + cider, cocktails, soft
+    drinks, freshly made juices) because they all share the "drinks" parent in category_path,
+    and sibling expansion treated them as interchangeable the same way it correctly does for
+    course-type groups (bao buns / gyoza / lighter bites / big flavour bites). That diluted
+    both hybrid retrieval and the rerank query text badly enough that every genuine coffee/tea
+    row lost to unrelated wine/juice/cider rows. Drink sub-categories are mutually exclusive
+    drink TYPES, not synonyms, so "drinks" must be excluded from sibling expansion specifically.
+    """
+    kb = FakeCategoryKB(
+        [
+            {
+                "item_type": "menu_item",
+                "category": "bao buns",
+                "category_path": ["sides", "bao buns"],
+            },
+            {"item_type": "menu_item", "category": "gyoza", "category_path": ["sides", "gyoza"]},
+            {
+                "item_type": "menu_item",
+                "category": "coffee + tea",
+                "category_path": ["drinks", "coffee + tea"],
+            },
+            {
+                "item_type": "menu_item",
+                "category": "wine + sake",
+                "category_path": ["drinks", "wine + sake"],
+            },
+            {"item_type": "faq", "category": "faqs", "category_path": ["faqs"]},
+        ]
+    )
+    index = load_category_index(kb)
+
+    # Course-type siblings still expand -- this is the behavior the mechanism exists for.
+    assert index.siblings["bao buns"] == {"bao buns", "gyoza"}
+    assert index.siblings["gyoza"] == {"bao buns", "gyoza"}
+
+    # Drink categories must NOT be expanded into each other.
+    assert "coffee + tea" not in index.siblings
+    assert "wine + sake" not in index.siblings
+
+    # alcoholic_only is computed straight from parent_groups, not from the sibling exclusion
+    # above, so it's unaffected by this fix.
+    assert index.alcoholic_only == {"wine + sake"}
 
 
 def test_understand_query_fallback_when_no_groq_client() -> None:

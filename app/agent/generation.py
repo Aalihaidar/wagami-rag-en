@@ -47,9 +47,21 @@ Rules:
   already tells you the answer -- state the NOTE's fact directly (e.g. why a dish is unsafe or
   doesn't qualify), the same way you would state a fact from a normal CONTEXT row.
 - State each dish's price exactly as given in CONTEXT.
+- When the guest asks about a specific ingredient by name rather than a specific dish (e.g.
+  "is there coffee", "do you have chocolate"), describe the matching CONTEXT rows as items
+  that CONTAIN that ingredient (e.g. "drinks that contain coffee") rather than labeling them
+  as though the ingredient were the whole item (e.g. not "coffee drinks") -- most matches
+  combine the named ingredient with others (milk, tea, spices, etc.), and "contains X" stays
+  accurate regardless of what else is in the recipe.
 - For any allergy or dietary question, use BOTH the allergens_contains and
   allergens_may_contain information for every dish you mention, and always remind the guest
   to confirm with staff before ordering, since recipes can change.
+- The guest-facing display only shows each mentioned dish's name, description, ingredients,
+  and price -- dietary tags, allergens, and nutrition never appear there. State those facts
+  yourself in your answer whenever they're relevant to the question -- always for an allergy/
+  dietary question per the rule above; for other questions, mention them when they add real
+  value (e.g. calorie count for a "what's healthy" question, ABV for a drinks question)
+  rather than reciting every field for every dish by default.
 - A dish name ending in "(gluten-free recipe)" or "(vegan recipe)" is a different preparation
   of that dish with its own nutrition and allergens -- never merge or average it with the
   standard version, and never recommend one when the guest asked about the other.
@@ -94,6 +106,7 @@ def format_row(row: MenuRow) -> str:
     protein_s = f"{protein:.0f}g protein" if protein is not None else "not listed"
     abv = pnum(row, "abv_percent")
     abv_s = f"{abv:.1f}% ABV" if abv is not None else "ABV not listed"
+    ingredients = ", ".join(plist(row, "ingredients")) or "not listed"
     diet = ", ".join(plist(row, "dietary_tags")) or "none listed"
     contains = ", ".join(plist(row, "allergens_contains")) or "none declared"
     may = ", ".join(plist(row, "allergens_may_contain")) or "none declared"
@@ -101,6 +114,7 @@ def format_row(row: MenuRow) -> str:
     return (
         f"- MENU ITEM | {name} <{pstr(row, 'category')}>\n"
         f"  description: {desc}\n"
+        f"  ingredients: {ingredients}\n"
         f"  price: {price_s}  |  kcal: {kcal_s}  |  protein: {protein_s}  |  {abv_s}  |  "
         f"gluten-free listed: {gf}\n"
         f"  dietary_tags: {diet}\n"
@@ -118,17 +132,31 @@ def build_context(ranked: list[RerankHit]) -> str:
 class CitedItem(TypedDict):
     id: str
     slug: str
+    name: str
+    description: str | None
+    ingredients: list[str]
+    price_gbp: float | None
     image: str
 
 
 def cited_items_from_ranked(ranked: list[RerankHit]) -> list[CitedItem]:
-    """Menu items from CONTEXT worth showing the guest a thumbnail for.
+    """Menu items from CONTEXT worth showing the guest a card for.
 
     First cut, not from a verified notebook: every CONTEXT menu row with an image, not just
     the ones the model's prose actually ends up mentioning -- the generation call returns
     free text only, with no structured per-row citation, so there's no cheaper way yet to
-    know which rows it actually used. Revisit if this over-shows images in practice (e.g. a
-    reply about one dish still surfacing thumbnails for five reranked candidates).
+    know which rows it actually used. Revisit if this over-shows cards in practice (e.g. a
+    reply about one dish still surfacing cards for five reranked candidates).
+
+    The card is deliberately a glance-level summary: name, description, ingredients, and
+    price only. Dietary tags, allergens, and nutrition are intentionally NOT carried through
+    here -- they're still real CONTEXT fields (format_row()) that the model sees and can
+    state in the answer text itself (see GENERATION_SYSTEM_PROMPT's rule on this), just not
+    duplicated onto the card. `name` also doubles as the image's `alt` text (Section B/4's
+    accessibility requirement). `description` is `None` on the 17/162 corpus rows that
+    genuinely have none (plain drinks, mostly); `ingredients` is a derived, not
+    source-verified field (see CLAUDE.md's schema note) -- both are omitted by the frontend
+    rather than shown as a placeholder when empty.
     """
     items: list[CitedItem] = []
     for hit in ranked:
@@ -138,7 +166,17 @@ def cited_items_from_ranked(ranked: list[RerankHit]) -> list[CitedItem]:
         image = pstr(row, "image")
         if not image:
             continue
-        items.append({"id": row["uuid"], "slug": pstr(row, "slug"), "image": image})
+        items.append(
+            {
+                "id": row["uuid"],
+                "slug": pstr(row, "slug"),
+                "name": pstr(row, "name"),
+                "description": pstr(row, "description") or None,
+                "ingredients": plist(row, "ingredients"),
+                "price_gbp": pnum(row, "price_gbp"),
+                "image": image,
+            }
+        )
     return items
 
 

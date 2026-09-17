@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>{{ title }}</title>
+    <meta name="description" content="{{ meta_description }}" />
+    <meta name="robots" content="noindex" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext x='16' y='24' font-size='24' text-anchor='middle'%3E%F0%9F%8D%9C%3C/text%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/static/css/chat.css?v={{ static_version }}" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="app-header">
+        <h1 class="app-header__title">Menu &amp; FAQ Assistant</h1>
+      </header>
+
+      <main
+        id="message-log"
+        class="message-log"
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions"
+        aria-label="Conversation"
+      ></main>
+
+      <footer class="composer-area">
+        <form id="composer" class="composer" autocomplete="off">
+          <button
+            type="button"
+            id="new-chat-button"
+            class="composer__button composer__button--new-chat"
+            aria-label="Start a new chat"
+            title="New chat"
+          >
+            <span aria-hidden="true">&#x21bb;</span>
+          </button>
+          <label class="visually-hidden" for="message-input">Message</label>
+          <input
+            type="text"
+            id="message-input"
+            name="message"
+            class="composer__input"
+            placeholder="Ask about a dish, price, allergen, or FAQ…"
+            maxlength="500"
+            autofocus
+          />
+          <button type="submit" id="send-button" class="composer__button composer__button--send">
+            Send
+          </button>
+          <button
+            type="button"
+            id="stop-button"
+            class="composer__button composer__button--stop"
+            hidden
+          >
+            Stop
+          </button>
+        </form>
+        <p class="privacy-note">
+          No personal data is collected. Your conversation is kept only in server memory for a
+          short window to keep replies coherent, and is discarded automatically shortly after you
+          leave or start a new chat.
+        </p>
+      </footer>
+    </div>
+
+    <div id="lightbox" class="lightbox" hidden role="dialog" aria-modal="true" aria-label="Image preview">
+      <button type="button" id="lightbox-close" class="lightbox__close" aria-label="Close image preview">
+        &times;
+      </button>
+      <img id="lightbox-image" class="lightbox__image" src="" alt="" />
+    </div>
+
+    <script src="/static/js/chat.js?v={{ static_version }}"></script>
+  </body>
+</html>

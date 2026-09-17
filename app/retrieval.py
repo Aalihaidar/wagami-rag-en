@@ -36,6 +36,7 @@ FIELDS = [
     "category",
     "item_type",
     "description",
+    "ingredients",
     "price_gbp",
     "kcal",
     "protein_g",

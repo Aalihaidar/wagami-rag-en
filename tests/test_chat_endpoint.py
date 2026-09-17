@@ -185,6 +185,10 @@ def test_chat_returns_answer_and_cited_items_with_overridden_graph() -> None:
                         "properties": {
                             "item_type": "menu_item",
                             "slug": "vegan-ramen",
+                            "name": "Vegan Ramen",
+                            "description": "Rich miso broth with tofu and greens.",
+                            "ingredients": ["tofu", "miso", "soya"],
+                            "price_gbp": 9.5,
                             "image": "vegan-ramen.png",
                         },
                     },
@@ -206,7 +210,15 @@ def test_chat_returns_answer_and_cited_items_with_overridden_graph() -> None:
         assert body["answer"] == "Our vegan ramen is £9.50."
         assert body["session_id"] == "s1"
         assert body["cited_items"] == [
-            {"id": "abc-123", "slug": "vegan-ramen", "image": "vegan-ramen.png"}
+            {
+                "id": "abc-123",
+                "slug": "vegan-ramen",
+                "name": "Vegan Ramen",
+                "description": "Rich miso broth with tofu and greens.",
+                "ingredients": ["tofu", "miso", "soya"],
+                "price_gbp": 9.5,
+                "image": "vegan-ramen.png",
+            }
         ]
         assert fake_graph.invoke_calls[0]["config"] == {"configurable": {"thread_id": "s1"}}
         assert fake_redis.store  # token usage was recorded

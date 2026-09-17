@@ -3,49 +3,105 @@ from app.agent.generation import (
     SAFE_FALLBACK_REPLY,
     build_context,
     build_user_prompt,
+    cited_items_from_ranked,
     contains_system_prompt_leak,
     format_row,
     temperature_for,
     tone_for,
 )
-from app.retrieval import MenuRow
+from app.retrieval import MenuRow, RerankHit
 
 
 def make_row(
     name: str,
     *,
     item_type: str = "menu_item",
+    slug: str | None = None,
     description: str | None = "tasty",
+    ingredients: list[str] | None = None,
     price_gbp: float | None = 9.5,
+    kcal: float | None = 500.0,
+    abv_percent: float | None = None,
     is_gluten_free_listed: bool = False,
     dietary_tags: list[str] | None = None,
     allergens_contains: list[str] | None = None,
     allergens_may_contain: list[str] | None = None,
+    image: str = "",
 ) -> MenuRow:
     return {
         "uuid": f"uuid-{name}",
         "score": 0.5,
         "properties": {
             "name": name,
+            "slug": slug or name.lower().replace(" ", "-"),
             "item_type": item_type,
             "description": description,
+            "ingredients": ingredients or [],
             "category": "ramen",
             "price_gbp": price_gbp,
-            "kcal": 500.0,
+            "kcal": kcal,
             "protein_g": 20.0,
-            "abv_percent": None,
+            "abv_percent": abv_percent,
             "is_gluten_free_listed": is_gluten_free_listed,
             "dietary_tags": dietary_tags or [],
             "allergens_contains": allergens_contains or [],
             "allergens_may_contain": allergens_may_contain or [],
+            "image": image,
         },
     }
+
+
+def make_hit(row: MenuRow) -> RerankHit:
+    return {"row": row, "rerank": 0.9, "hybrid": 0.9}
 
 
 def test_tone_and_temperature_by_intent() -> None:
     assert tone_for("faq") != tone_for("menu")
     assert temperature_for("faq") == 0.8
     assert temperature_for("menu") == 0.2
+
+
+def test_cited_items_from_ranked_includes_description_ingredients_and_price() -> None:
+    """The card is deliberately just name/description/ingredients/price/image -- dietary
+    tags, allergens, and nutrition are real CONTEXT fields (format_row()) the model can
+    state in the answer text itself, not duplicated here (Section 4)."""
+    ramen = make_row(
+        "vegan ramen",
+        description="Rich miso broth.",
+        ingredients=["tofu", "miso", "soya"],
+        price_gbp=9.5,
+        image="r.png",
+    )
+    espresso = make_row(
+        "double espresso", description=None, ingredients=["coffee"], price_gbp=2.5, image="e.png"
+    )
+    faq = make_row("what time do you open", item_type="faq", image="")  # never cited
+    no_image = make_row("no image dish", image="")  # never cited -- nothing to show a card for
+
+    items = cited_items_from_ranked(
+        [make_hit(ramen), make_hit(espresso), make_hit(faq), make_hit(no_image)]
+    )
+
+    assert items == [
+        {
+            "id": "uuid-vegan ramen",
+            "slug": "vegan-ramen",
+            "name": "vegan ramen",
+            "description": "Rich miso broth.",
+            "ingredients": ["tofu", "miso", "soya"],
+            "price_gbp": 9.5,
+            "image": "r.png",
+        },
+        {
+            "id": "uuid-double espresso",
+            "slug": "double-espresso",
+            "name": "double espresso",
+            "description": None,  # omitted card line, not a placeholder string
+            "ingredients": ["coffee"],
+            "price_gbp": 2.5,
+            "image": "e.png",
+        },
+    ]
 
 
 def test_format_row_faq() -> None:
@@ -58,6 +114,7 @@ def test_format_row_faq() -> None:
 def test_format_row_menu_item_includes_all_fields() -> None:
     row = make_row(
         "vegan ramen",
+        ingredients=["tofu", "soya"],
         dietary_tags=["vegan"],
         allergens_contains=["soya"],
         allergens_may_contain=["sesame"],
@@ -66,6 +123,7 @@ def test_format_row_menu_item_includes_all_fields() -> None:
     assert "vegan ramen" in line
     assert "£9.50" in line
     assert "500 kcal" in line
+    assert "ingredients: tofu, soya" in line
     assert "dietary_tags: vegan" in line
     assert "allergens_contains: soya" in line
     assert "allergens_may_contain: sesame" in line
@@ -76,6 +134,7 @@ def test_format_row_handles_missing_price_and_abv() -> None:
     line = format_row(row)
     assert "price: not listed" in line
     assert "ABV not listed" in line
+    assert "ingredients: not listed" in line
 
 
 def test_build_context_empty_when_no_ranked_hits() -> None:
