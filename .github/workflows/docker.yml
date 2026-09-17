@@ -4,7 +4,10 @@ on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
-    branches: [main]
+    # main -> production, develop -> staging. Direct pushes to either are
+    # blocked by the repo's rulesets (.github/CONTRIBUTING.md §2), so a green
+    # CI run here always means a PR just merged, never a stray push.
+    branches: [main, develop]
   workflow_dispatch:
     inputs:
       push_image:
@@ -28,8 +31,9 @@ permissions:
   contents: read
 
 jobs:
-  # docker/Dockerfile.prod does not exist in Phase 1. Gate the build on it so
-  # this workflow no-ops cleanly until the production image is added.
+  # Gate the build on docker/Dockerfile.prod existing so a checkout that
+  # somehow lacks it (or a future revert) no-ops this workflow cleanly
+  # instead of failing the build step.
   detect:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -60,12 +64,27 @@ jobs:
       image-digest: ${{ steps.build.outputs.digest }}
       image-tags: ${{ steps.meta.outputs.tags }}
       primary-tag: ${{ steps.meta.outputs.json && fromJSON(steps.meta.outputs.json).tags[0] }}
+      # Which environment this build is for: 'main' -> production, 'develop'
+      # -> staging. Resolved once here so both deploy jobs below branch on it
+      # without re-deriving it from two different event shapes themselves.
+      target-branch: ${{ steps.target.outputs.branch }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Resolve target branch
+        id: target
+        run: |
+          # workflow_run doesn't put the triggering branch on github.ref_name
+          # (that's always the default branch); workflow_dispatch does.
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "branch=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "branch=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
@@ -86,7 +105,8 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ steps.target.outputs.branch == 'main' }}
+            type=raw,value=staging,enable=${{ steps.target.outputs.branch == 'develop' }}
             type=sha,prefix=sha-,format=short
             type=semver,pattern={{version}}
 
@@ -143,13 +163,38 @@ jobs:
             echo "| **Commit** | \`${{ github.sha }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  deploy:
-    name: Trigger Render Deploy
+  # main -> production, develop -> staging (Section 1 / Section F of
+  # docs/APP_AND_DEPLOYMENT_PLAN.md). Each is its own GitHub Environment so
+  # the two deploy hook secrets stay scoped separately and either can get a
+  # required-reviewer gate later without touching the other.
+  deploy-staging:
+    name: Trigger Render Deploy (staging)
     needs: build-and-push
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: >
       needs.build-and-push.result == 'success' &&
+      needs.build-and-push.outputs.target-branch == 'develop'
+    environment: staging
+    steps:
+      - name: Call Render deploy hook
+        env:
+          DEPLOY_HOOK: ${{ secrets.RENDER_STAGING_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$DEPLOY_HOOK" ]; then
+            echo "RENDER_STAGING_DEPLOY_HOOK_URL not set — skipping deploy trigger."
+            exit 0
+          fi
+          curl -fsS --retry 3 --retry-delay 5 -X POST "$DEPLOY_HOOK"
+
+  deploy-production:
+    name: Trigger Render Deploy (production)
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >
+      needs.build-and-push.result == 'success' &&
+      needs.build-and-push.outputs.target-branch == 'main' &&
       (github.event_name != 'workflow_dispatch' || inputs.push_image == 'true')
     environment: production
     steps:

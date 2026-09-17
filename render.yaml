@@ -1,0 +1,82 @@
+# render.yaml — Blueprint for the two long-lived environments described in
+# docs/APP_AND_DEPLOYMENT_PLAN.md's "Branching, environments & CD strategy"
+# (Section 1) and .github/CONTRIBUTING.md §4.
+#
+# Both services deploy a pre-built image from GHCR — built and pushed by
+# .github/workflows/docker.yml, never a git-connected build — because for
+# `runtime: image` services, a git push cannot trigger a deploy at all
+# (Render's own Blueprint spec: the auto-deploy trigger setting "has no
+# effect for services that deploy a prebuilt Docker image"). That's a
+# property of this design, not a settings toggle: nothing can reach either
+# service except through the workflow's deploy-hook call, which only runs
+# after a green CI run on the matching branch (develop -> staging image tag,
+# main -> latest image tag). Never add a git-connected service pointing at
+# this repo alongside these — that would reintroduce a deploy path CI never
+# gated.
+#
+# One-time setup (Section 5.F's "one-time manual setup" checklist item):
+#   1. Render dashboard -> New -> Blueprint -> point at this repo/branch.
+#   2. For each service, Settings -> Environment -> fill in the `sync: false`
+#      values below (they are prompted for, never stored in this file).
+#   3. For each service, Settings -> Deploy Hook -> copy the URL into the
+#      matching GitHub Environment secret (RENDER_STAGING_DEPLOY_HOOK_URL /
+#      RENDER_DEPLOY_HOOK_URL) so CI can trigger it.
+#
+# Env var names below match app/config.py's Settings fields exactly (not
+# .env.example, which still reflects an earlier Gemini-based plan — see
+# docs/APP_AND_DEPLOYMENT_PLAN.md Section 2's LLM-provider note).
+
+services:
+  - name: wagami-rag-en-staging
+    type: web
+    runtime: image
+    plan: free
+    region: oregon
+    image:
+      url: ghcr.io/aalihaidar/wagami-rag-en:staging
+    healthCheckPath: /healthz
+    envVars:
+      - key: APP_ENV
+        value: production # Settings only distinguishes development/production; staging runs
+          # the same hardened config as prod (no /docs, HSTS, generic errors) — see CLAUDE.md's
+          # `app_env: Literal["development", "production"]`.
+      - key: WEAVIATE_URL
+        sync: false
+      - key: WEAVIATE_READ_API_KEY
+        sync: false
+      - key: EMBEDDING_PROVIDER
+        value: cohere
+      - key: EMBEDDING_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: IMAGE_BASE_URL
+        sync: false
+
+  - name: wagami-rag-en
+    type: web
+    runtime: image
+    plan: free
+    region: oregon
+    image:
+      url: ghcr.io/aalihaidar/wagami-rag-en:latest
+    healthCheckPath: /healthz
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: WEAVIATE_URL
+        sync: false
+      - key: WEAVIATE_READ_API_KEY
+        sync: false
+      - key: EMBEDDING_PROVIDER
+        value: cohere
+      - key: EMBEDDING_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: IMAGE_BASE_URL
+        sync: false
