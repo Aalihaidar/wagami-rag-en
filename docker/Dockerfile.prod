@@ -73,11 +73,20 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # Shell form so ${PORT}/${WEB_CONCURRENCY} expand at container start (Render
 # injects PORT); `exec` replaces the shell so gunicorn is PID 1 and receives
 # signals (graceful shutdown on SIGTERM) directly instead of via a shell parent.
+#
+# --no-control-socket: gunicorn >=25.1 creates a control socket (for the
+# `gunicornc` CLI) at $HOME/.gunicorn/gunicorn.ctl by default. The `app` user's
+# HOME (/app) isn't writable by it (only /opt/venv is chowned above), so this
+# would otherwise log a "Control server error: Permission denied" on every
+# boot -- confirmed live on Render. Non-fatal (gunicorn just runs without the
+# socket) but nothing in this container ever runs `gunicornc`, so disable it
+# outright instead of chowning a directory for a feature that's never used.
 CMD exec gunicorn app.main:app \
     --worker-class uvicorn.workers.UvicornWorker \
     --workers "${WEB_CONCURRENCY:-2}" \
     --bind "0.0.0.0:${PORT:-8000}" \
     --timeout 60 \
     --graceful-timeout 30 \
+    --no-control-socket \
     --access-logfile - \
     --error-logfile -
