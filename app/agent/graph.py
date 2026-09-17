@@ -13,6 +13,7 @@ would need human-in-the-loop approval. If a future feature ever adds a write-cap
 (order placement, reservation booking), re-read that whole section before shipping it.
 """
 
+import json
 import operator
 from typing import Annotated, Any, Required, TypedDict
 
@@ -21,10 +22,14 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.agent.generation import (
+    CITATION_OUTPUT_INSTRUCTIONS,
     GENERATION_SYSTEM_PROMPT,
     SAFE_FALLBACK_REPLY,
+    SCOPE_AND_SAFETY,
     build_context,
+    build_generation_response_schema,
     build_user_prompt,
+    citable_slugs,
     contains_system_prompt_leak,
     temperature_for,
     tone_for,
@@ -53,7 +58,9 @@ class AgentState(TypedDict, total=False):
     temperature: Required[float]
     system_prompt: Required[str]
     user_prompt: Required[str]
+    citable_slugs: Required[list[str]]
     answer: str
+    cited_slugs: list[str]
     usage: dict[str, Any]
 
 
@@ -98,12 +105,12 @@ def build_graph(
         intent = understanding["intent"]
         tone = tone_for(intent)
         temperature = temperature_for(intent)
+        ranked = search_result["ranked"] if search_result["answerable"] else []
+        candidate_slugs = citable_slugs(ranked)
         system_prompt = f"{GENERATION_SYSTEM_PROMPT}\n\n{tone}"
-        context = (
-            build_context(search_result["ranked"])
-            if search_result["answerable"]
-            else "(no confident match)"
-        )
+        if candidate_slugs:
+            system_prompt += f"\n\n{CITATION_OUTPUT_INSTRUCTIONS}"
+        context = build_context(ranked) if search_result["answerable"] else "(no confident match)"
         user_prompt = build_user_prompt(
             state["question"],
             context,
@@ -115,26 +122,47 @@ def build_graph(
             "temperature": temperature,
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
+            "citable_slugs": candidate_slugs,
         }
 
     def answer_node(state: AgentState) -> dict[str, Any]:
         understand_usage = state["understanding"]["usage"]
+        candidate_slugs = state["citable_slugs"]
         if groq_client is None:
             reply = "[LLM not configured -- skipping live call]"
+            cited_slugs: list[str] = []
             gen_usage = zero_usage()
         else:
-            gen = groq_client.call(
-                state["system_prompt"],
-                state["user_prompt"],
-                model=generation_model,
-                temperature=state["temperature"],
-            )
-            reply = gen["text"]
+            if candidate_slugs:
+                gen = groq_client.call(
+                    state["system_prompt"],
+                    state["user_prompt"],
+                    model=generation_model,
+                    temperature=state["temperature"],
+                    response_schema=build_generation_response_schema(candidate_slugs),
+                )
+                parsed = json.loads(gen["text"])
+                reply = parsed.get("answer", "")
+                cited_slugs = [s for s in parsed.get("cited_slugs", []) if s in candidate_slugs]
+            else:
+                gen = groq_client.call(
+                    state["system_prompt"],
+                    state["user_prompt"],
+                    model=generation_model,
+                    temperature=state["temperature"],
+                )
+                reply = gen["text"]
+                cited_slugs = []
             gen_usage = gen["usage"]
             # Output-side check (Section 3): defense-in-depth behind the system prompt's own
-            # "never reveal yourself" instruction, not a replacement for it.
-            if contains_system_prompt_leak(state["system_prompt"], reply):
+            # "never reveal yourself" instruction, not a replacement for it. Checked against
+            # SCOPE_AND_SAFETY specifically, not the full system_prompt -- GENERATION_RULES
+            # (the other half of GENERATION_SYSTEM_PROMPT) deliberately instructs content
+            # that's supposed to reach the guest almost verbatim (e.g. the demo/limited-data
+            # decline wording), so scanning the reply against it produces false positives.
+            if contains_system_prompt_leak(SCOPE_AND_SAFETY, reply):
                 reply = SAFE_FALLBACK_REPLY
+                cited_slugs = []
         usage = {
             "understand": understand_usage,
             "generate": gen_usage,
@@ -142,6 +170,7 @@ def build_graph(
         }
         return {
             "answer": reply,
+            "cited_slugs": cited_slugs,
             "usage": usage,
             "history": [{"question": state["question"], "answer": reply}],
         }

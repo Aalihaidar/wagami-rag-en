@@ -11,12 +11,12 @@ const MAX_MESSAGE_LENGTH = 500;
 const NEAR_BOTTOM_THRESHOLD_PX = 80;
 
 const INTRO_MESSAGE =
-  "This is a demo restaurant chatbot built by Ali Haidar to showcase a retrieval-grounded " +
+  "This is a demo restaurant chatbot built by ENG Ali Haidar to showcase a retrieval-grounded " +
   "AI assistant. It runs on free-tier tools, so responses may be slower or less polished " +
   "than a production deployment would be -- ask about menu items, prices, nutrition, " +
   "allergens, or general FAQs.\n\n" +
-  "I can't place an order or help with a severe-allergy emergency -- for those, please talk " +
-  "to a member of staff directly.";
+  "As this is just a demo, I can't place an order or help with a severe-allergy emergency -- " +
+  "a real restaurant deployment could add both.";
 
 const messageLog = document.getElementById("message-log");
 const composer = document.getElementById("composer");

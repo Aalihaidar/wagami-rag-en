@@ -175,6 +175,7 @@ class FakeGraph:
 def test_chat_returns_answer_and_cited_items_with_overridden_graph() -> None:
     final_state = {
         "answer": "Our vegan ramen is £9.50.",
+        "cited_slugs": ["vegan-ramen"],
         "usage": {"total_tokens": 42},
         "search_result": {
             "ranked": [
