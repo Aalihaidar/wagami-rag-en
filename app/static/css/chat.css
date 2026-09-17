@@ -1,0 +1,437 @@
+/* Light palette (default). Dark palette redefines the same tokens below under
+   prefers-color-scheme -- no color is ever defined only inside that block.
+   Built around the requested #016b5d primary (a deep emerald/teal) -- neutrals
+   given a cool, slightly green-gray undertone rather than a warm one so they
+   read as one deliberate system with the accent instead of clashing against
+   it. Error red is kept deliberately separate from the accent hue (a
+   universal, provider-agnostic convention for error states), and the focus
+   ring stays blue so it's visibly distinct against accent-colored controls,
+   not just a duller version of the same color. Both pairs checked at
+   WCAG AA (>=4.5:1) for text-on-background and text-on-accent. */
+:root {
+  --bg: #f4f7f6;
+  --surface: #ffffff;
+  --border: #dbe4e1;
+  --text: #16211d;
+  --text-muted: #5c6b67;
+  --accent: #016b5d;
+  --accent-text: #ffffff;
+  --assistant-bubble: #ffffff;
+  --guest-bubble: #016b5d;
+  --guest-bubble-text: #ffffff;
+  --error-bubble: #fdecea;
+  --error-border: #c0392b;
+  --focus-ring: #2f6fb3;
+  --radius: 14px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1613;
+    --surface: #16211e;
+    --border: #2b3733;
+    --text: #eef3f1;
+    --text-muted: #9db0ac;
+    --accent: #1f9d85;
+    --accent-text: #06231e;
+    --assistant-bubble: #16211e;
+    --guest-bubble: #1f9d85;
+    --guest-bubble-text: #06231e;
+    --error-bubble: #3a2020;
+    --error-border: #ef5350;
+    --focus-ring: #7db2e8;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  max-width: 720px;
+  margin: 0 auto;
+  background: var(--bg);
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  padding: calc(12px + var(--safe-top)) 16px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.app-header__title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.message-log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.message {
+  max-width: 82%;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  opacity: 0;
+  transform: translateY(4px);
+  animation: message-in 180ms ease-out forwards;
+}
+
+@keyframes message-in {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message--assistant {
+  align-self: flex-start;
+  background: var(--assistant-bubble);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 4px;
+}
+
+.message--guest {
+  align-self: flex-end;
+  background: var(--guest-bubble);
+  color: var(--guest-bubble-text);
+  border-bottom-right-radius: 4px;
+}
+
+.message--error {
+  align-self: flex-start;
+  background: var(--error-bubble);
+  border: 1px solid var(--error-border);
+}
+
+.message--system {
+  align-self: center;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  border: none;
+  padding: 4px 10px;
+}
+
+.item-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.item-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.item-card__image-button {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  cursor: zoom-in;
+  overflow: hidden;
+}
+
+.item-card__image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.2s ease;
+}
+
+.item-card__image-button:hover .item-card__image,
+.item-card__image-button:focus-visible .item-card__image {
+  transform: scale(1.05);
+}
+
+.item-card__body {
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.item-card__name {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text);
+  white-space: normal;
+}
+
+.item-card__description {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+.item-card__ingredients {
+  margin: 0;
+  font-size: 0.75rem;
+  font-style: italic;
+  color: var(--text-muted);
+  line-height: 1.35;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+.item-card__price {
+  margin: 2px 0 0;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--accent);
+  white-space: normal;
+}
+
+.typing-indicator {
+  align-self: flex-start;
+  display: inline-flex;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--assistant-bubble);
+  border: 1px solid var(--border);
+}
+
+.typing-indicator__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: typing-bounce 1.1s infinite ease-in-out;
+}
+
+.typing-indicator__dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-indicator__dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing-bounce {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.composer-area {
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: 10px 16px calc(10px + var(--safe-bottom));
+  position: sticky;
+  bottom: 0;
+}
+
+.composer {
+  display: flex;
+  gap: 8px;
+}
+
+.composer__input {
+  flex: 1 1 auto;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.composer__button {
+  border: none;
+  border-radius: 999px;
+  padding: 0 18px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.composer__button--send {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.composer__button--send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.composer__button--stop {
+  background: transparent;
+  border: 1px solid var(--error-border);
+  color: var(--error-border);
+}
+
+/* Moved down from the header (Section 4) so it stays reachable via the sticky composer-area
+   without scrolling back up once a conversation runs long -- icon-only, same affordance as
+   the lightbox's close button, since the composer row has far less room than the header did. */
+.composer__button--new-chat {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1.2rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.composer__button--new-chat:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.privacy-note {
+  margin: 8px 0 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* [hidden] must win over the unconditional `display: flex` below -- otherwise this class's
+   own specificity beats the UA stylesheet's `[hidden] { display: none }` by cascade order
+   (author styles apply after user-agent styles at equal specificity), and the lightbox stays
+   in the layout -- invisible (fully transparent background isn't the issue; it's *present*
+   and catches pointer events) -- and silently intercepts clicks across the whole page even
+   while `hidden` is set. Confirmed live: the "New chat" button was unclickable until this
+   rule was added. */
+.lightbox[hidden] {
+  display: none;
+}
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  padding: 24px;
+}
+
+.lightbox__image {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+}
+
+.lightbox__close {
+  position: absolute;
+  top: calc(12px + var(--safe-top));
+  right: 16px;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+
+  .typing-indicator__dot {
+    animation: none;
+  }
+
+  .item-card__image {
+    transition: none;
+  }
+}

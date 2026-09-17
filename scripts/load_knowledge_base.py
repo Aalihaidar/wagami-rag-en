@@ -91,6 +91,13 @@ def create_collection(client: WeaviateClient) -> None:
             wvc.Property(name="name", data_type=wvc.DataType.TEXT, skip_vectorization=True),
             wvc.Property(name="slug", data_type=wvc.DataType.TEXT, skip_vectorization=True),
             wvc.Property(name="description", data_type=wvc.DataType.TEXT, skip_vectorization=True),
+            # Derived, not source-verified -- see data/add_ingredients_field.py's own
+            # docstring. Not folded into embedding_text/VECTORIZED_PROPERTY.
+            wvc.Property(
+                name="ingredients",
+                data_type=wvc.DataType.TEXT_ARRAY,
+                skip_vectorization=True,
+            ),
             wvc.Property(name="category", data_type=wvc.DataType.TEXT, skip_vectorization=True),
             wvc.Property(
                 name="category_slug",

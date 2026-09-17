@@ -17,6 +17,10 @@ class ChatRequest(BaseModel):
 class CitedItem(BaseModel):
     id: str
     slug: str
+    name: str
+    description: str | None = None
+    ingredients: list[str] = Field(default_factory=list)
+    price_gbp: float | None = None
     image: str
 
 
