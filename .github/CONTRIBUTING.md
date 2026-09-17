@@ -21,7 +21,9 @@ feature/*  ─PR─▶  develop  ─PR─▶  main   (release)
 - **`develop` is the default branch.** Dependabot reads `.github/dependabot.yml`
   from the default branch, and its `target-branch: develop` means every
   dependency PR opens against `develop`, never `main`.
-- Deploys are driven by pushes to `main` (see [`workflows/docker.yml`](workflows/docker.yml)).
+- Deploys are driven by merges to `develop` (staging) and `main` (production)
+  — see [`workflows/docker.yml`](workflows/docker.yml) §4. Both branches are
+  PR-only (§2), so "merge" is the only way either deploy fires.
 
 ### One-time bootstrap sequence
 
@@ -123,14 +125,39 @@ ecosystem (§5) bumps both the SHA and the comment.
 
 ## 4. Build & deploy — [`workflows/docker.yml`](workflows/docker.yml)
 
-`workflow_run` after CI succeeds on `main` (or manual `workflow_dispatch`) →
-build multi-arch image → push to GHCR with provenance + SBOM → Trivy scan →
-SARIF to the Security tab → trigger Render deploy hook. Gated on
-`docker/Dockerfile.prod` existing, so it no-ops during phase 1. `packages` /
-`security-events` / `id-token` write scopes are granted only on the build job.
+`workflow_run` after CI succeeds on `main` **or** `develop` (or manual
+`workflow_dispatch`) → build one multi-arch image → push to GHCR with
+provenance + SBOM → Trivy scan → SARIF to the Security tab → trigger the
+matching Render deploy hook. Because both branches are ruleset-protected
+(§2 — PR-only, no direct pushes), a green CI run here is always the result
+of a merged PR, never a stray push.
+
+| Branch merged into | Image tag | Deploy target | GitHub Environment | Deploy hook secret |
+| --- | --- | --- | --- | --- |
+| `develop` | `staging`, `sha-<short>` | Render staging service | `staging` | `RENDER_STAGING_DEPLOY_HOOK_URL` |
+| `main` | `latest`, `sha-<short>` | Render production service | `production` | `RENDER_DEPLOY_HOOK_URL` |
+
+One `build-and-push` job resolves which branch triggered it (`workflow_run`'s
+`head_branch`, or `github.ref_name` for a manual dispatch), tags the image
+accordingly, and exposes that as a `target-branch` output; two downstream
+jobs (`deploy-staging`, `deploy-production`) each fire only for their branch.
+Both Render services are defined in [`render.yaml`](../render.yaml) as
+`runtime: image` services — Render's own Blueprint spec is explicit that the
+auto-deploy trigger "has no effect for services that deploy a prebuilt
+Docker image," so a git push cannot deploy either one no matter how it's
+configured. The deploy hook, called only by a job downstream of a green CI
+run on the right branch, is the only path in — that's a structural property
+of `runtime: image` services, not a setting that could drift back open.
+`packages` / `security-events` / `id-token` write scopes are granted only on
+the build job.
 
 Required repo secrets when this goes live: `CODECOV_TOKEN` (private repos),
-`RENDER_DEPLOY_HOOK_URL`. `GITHUB_TOKEN` is automatic.
+`RENDER_DEPLOY_HOOK_URL` (`production` environment),
+`RENDER_STAGING_DEPLOY_HOOK_URL` (`staging` environment). `GITHUB_TOKEN` is
+automatic. See
+[`docs/APP_AND_DEPLOYMENT_PLAN.md`](../docs/APP_AND_DEPLOYMENT_PLAN.md)
+Section 1 for applying `render.yaml` and the rest of the one-time Render
+setup this depends on.
 
 ## 5. Dependency automation — [`dependabot.yml`](dependabot.yml)
 
@@ -188,5 +215,7 @@ organization, update those three places (and switch `CODEOWNERS` to a team).
 - `pre-commit` autoupdate (its hooks aren't covered by Dependabot) — e.g. a
   scheduled `pre-commit autoupdate` PR, or pre-commit.ci.
 - Release automation (`release-please` or `changesets`) once `main` cuts tags.
-- A `release` GitHub Environment with required reviewers, referenced by the
-  deploy job.
+- The `production` GitHub Environment (§4) can take a required-reviewer rule
+  once there's someone other than the sole maintainer to review a prod
+  deploy — pointless for a solo project today, but the environment already
+  exists as the seam to add it to later without touching the workflow.
