@@ -7,7 +7,9 @@ not Gemini, and why that specific notebook).
 """
 
 import json
+import os
 import random
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -47,6 +49,22 @@ def zero_usage() -> Usage:
     return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
+def load_groq_key_pool(base_key: str) -> list[str]:
+    """base_key plus any GROQ_API_KEY_1..GROQ_API_KEY_21 set in the environment, in order.
+
+    Same pool/convention the notebooks already use (see CLAUDE.md's Environment & tooling
+    section) -- read directly from os.environ rather than app/config.py's Settings, since
+    these are a variable-length, deliberately-undocumented-in-.env.example personal-account
+    pool, not a fixed set of fields worth modeling on Settings.
+    """
+    pool = [base_key.strip()] if base_key.strip() else []
+    for i in range(1, 22):
+        key = os.environ.get(f"GROQ_API_KEY_{i}", "").strip()
+        if key:
+            pool.append(key)
+    return pool
+
+
 def _http_error_detail(e: urllib.error.HTTPError) -> str:
     """Read and return a truncated response body from an HTTPError, then close it.
 
@@ -68,10 +86,19 @@ class GroqClient:
     Holds its own call-pacing state, so it's instantiated once (FastAPI lifespan) and reused
     across requests rather than recreated per call -- the same pattern as
     app/retrieval.py's RetrievalTool for Cohere rerank pacing.
+
+    Optionally rotates across a pool of keys (key_pool) -- the same GROQ_API_KEY /
+    GROQ_API_KEY_1.._21 convention the notebooks use (see load_groq_key_pool()), so a key
+    that's hit its rate/day limit doesn't take the whole app down with it. Pacing
+    (LLM_MAX_RPM) stays a single shared budget across the whole pool rather than per-key --
+    deliberately conservative; the pool exists for failover, not for maximizing aggregate
+    throughput.
     """
 
-    def __init__(self, api_key: str) -> None:
-        self._api_key = api_key
+    def __init__(self, api_key: str, key_pool: list[str] | None = None) -> None:
+        self._key_pool = key_pool if key_pool else [api_key]
+        self._pool_index = 0
+        self._pool_lock = threading.Lock()
         self._last_call_at = 0.0
 
     def _pace(self) -> None:
@@ -96,7 +123,81 @@ class GroqClient:
         understand_query()); omit it for a free-text reply (used by answer generation). Pass
         reasoning_effort ("low"/"medium"/"high", gpt-oss models only) to control how many
         reasoning tokens the model spends before answering.
+
+        With more than one pool key, tries each once (a single fast attempt, no backoff)
+        before falling to the next -- honoring a failing key's full retry/backoff first would
+        make rotation too slow to be worth it (same reasoning as the notebooks' own
+        `_call_llm_with_rotation`). Once every key has failed once, falls through to one
+        full-retry/backoff call in case the failure was transient rather than the whole pool
+        being genuinely exhausted. Unlike the notebooks (single-threaded, a shared global
+        "current key"), the key used per attempt is kept local to this call rather than
+        mutating shared state beyond the rotation pointer itself -- this class is shared
+        across concurrent request-handling threads (FastAPI's threadpool), so a "currently
+        active key" attribute would race.
         """
+        total_keys = len(self._key_pool)
+        if total_keys <= 1:
+            return self._call_single_key(
+                self._key_pool[0],
+                system_prompt,
+                user_prompt,
+                model=model,
+                response_schema=response_schema,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+                max_retries=MAX_LLM_RETRIES,
+            )
+
+        for attempt in range(total_keys):
+            with self._pool_lock:
+                idx = self._pool_index
+            try:
+                return self._call_single_key(
+                    self._key_pool[idx],
+                    system_prompt,
+                    user_prompt,
+                    model=model,
+                    response_schema=response_schema,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                    max_retries=1,
+                )
+            except urllib.error.HTTPError as e:
+                with self._pool_lock:
+                    if self._pool_index == idx:
+                        self._pool_index = (idx + 1) % total_keys
+                if attempt < total_keys - 1:
+                    print(
+                        f"   [Groq key #{idx + 1}/{total_keys} failed fast (HTTP {e.code}); "
+                        f"rotating to key #{self._pool_index + 1}/{total_keys}]"
+                    )
+
+        with self._pool_lock:
+            idx = self._pool_index
+        print("   [every pool key failed once -- falling back to full retry/backoff]")
+        return self._call_single_key(
+            self._key_pool[idx],
+            system_prompt,
+            user_prompt,
+            model=model,
+            response_schema=response_schema,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+            max_retries=MAX_LLM_RETRIES,
+        )
+
+    def _call_single_key(
+        self,
+        api_key: str,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        model: str,
+        response_schema: dict | None,
+        temperature: float | None,
+        reasoning_effort: str | None,
+        max_retries: int,
+    ) -> LLMResponse:
         payload: dict = {
             "model": model,
             "messages": [
@@ -116,10 +217,10 @@ class GroqClient:
         body = json.dumps(payload).encode()
 
         delay_cap = BASE_DELAY_S
-        for attempt in range(1, MAX_LLM_RETRIES + 1):
+        for attempt in range(1, max_retries + 1):
             self._pace()
             req = urllib.request.Request(GROQ_URL, data=body, headers=_GROQ_HEADERS, method="POST")
-            req.add_header("Authorization", f"Bearer {self._api_key.strip()}")
+            req.add_header("Authorization", f"Bearer {api_key.strip()}")
             retry_after: str | None = None
             detail = ""
             label = ""
@@ -139,11 +240,11 @@ class GroqClient:
                 retry_after = e.headers.get("Retry-After") if retryable else None
                 label = f"HTTP {e.code} {e.reason}"
                 detail = _http_error_detail(e)
-                if not retryable or attempt == MAX_LLM_RETRIES:
+                if not retryable or attempt == max_retries:
                     raise
             except urllib.error.URLError as e:
                 label = f"connection error ({e.reason})"
-                if attempt == MAX_LLM_RETRIES:
+                if attempt == max_retries:
                     raise
 
             if retry_after:
@@ -154,9 +255,7 @@ class GroqClient:
             else:
                 wait = random.uniform(0, delay_cap)
             suffix = f"  {detail}" if detail else ""
-            print(
-                f"   [LLM {label}; retrying in {wait:.1f}s ({attempt}/{MAX_LLM_RETRIES})]{suffix}"
-            )
+            print(f"   [LLM {label}; retrying in {wait:.1f}s ({attempt}/{max_retries})]{suffix}")
             time.sleep(wait)
             delay_cap = min(delay_cap * 2, MAX_DELAY_S)
 

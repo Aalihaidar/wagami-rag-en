@@ -50,6 +50,10 @@ services:
         sync: false
       - key: GROQ_API_KEY
         sync: false
+        # Optional: GroqClient also rotates across GROQ_API_KEY_1..GROQ_API_KEY_21 if present
+        # (same convention as the notebooks — see CLAUDE.md's Environment & tooling section).
+        # Add them here too, individually, if you use a rotation pool; not listed since the
+        # pool size varies per operator.
       - key: REDIS_URL
         sync: false
       - key: IMAGE_BASE_URL
