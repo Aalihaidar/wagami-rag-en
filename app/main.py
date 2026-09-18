@@ -24,7 +24,7 @@ from app.agent.checkpointer import build_checkpointer
 from app.agent.generation import CitedItem as GeneratedCitedItem
 from app.agent.generation import cited_items_from_ranked
 from app.agent.graph import build_graph
-from app.agent.llm import GroqClient
+from app.agent.llm import GroqClient, load_groq_key_pool
 from app.agent.understanding import load_category_index
 from app.config import get_settings
 from app.cost_control import (
@@ -88,7 +88,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         kb = weaviate_client.collections.get("KnowledgeBase")
         retrieval_tool = RetrievalTool(kb=kb, cohere_api_key=settings.embedding_api_key)
         category_index = load_category_index(kb)
-        groq_client = GroqClient(settings.groq_api_key) if settings.groq_api_key else None
+        groq_key_pool = load_groq_key_pool(settings.groq_api_key)
+        groq_client = (
+            GroqClient(settings.groq_api_key, key_pool=groq_key_pool) if groq_key_pool else None
+        )
         app.state.redis_client = redis_client
         with build_checkpointer(settings.redis_url) as checkpointer:
             app.state.checkpointer = checkpointer
