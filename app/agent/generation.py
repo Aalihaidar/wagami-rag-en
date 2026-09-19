@@ -5,6 +5,8 @@ in build_user_prompt() below (see docs/APP_AND_DEPLOYMENT_PLAN.md's LLM-provider
 why this specific notebook is the verified porting source).
 """
 
+import json
+import re
 from typing import TypedDict
 
 from app.retrieval import ExcludedTopMatch, MenuRow, RerankHit, pbool, plist, pnum, pstr
@@ -22,6 +24,10 @@ FAQ_TONE = (
 )
 MENU_TEMPERATURE = 0.2
 FAQ_TEMPERATURE = 0.8
+# Fewer reasoning tokens before the answer starts -- the answer is a rewording of CONTEXT rather
+# than open-ended reasoning. Unlike understand's setting, not yet checked against the evaluation
+# notebook's allergen/decline bars: re-run notebooks/03_evaluation.ipynb before relying on it.
+GENERATION_REASONING_EFFORT = "low"
 
 
 def tone_for(intent: str) -> str:
@@ -158,8 +164,8 @@ def build_context(ranked: list[RerankHit]) -> str:
 
 def citable_slugs(ranked: list[RerankHit]) -> list[str]:
     """Slugs of every reranked menu row with an image -- the only rows a card could ever be
-    shown for, and therefore the fixed vocabulary the generation call's structured
-    `cited_slugs` output is constrained to (see build_generation_response_schema())."""
+    shown for, and therefore the fixed vocabulary the generation call's `cited_slugs` output
+    is filtered to (see parse_generation_reply())."""
     return [
         pstr(hit["row"], "slug")
         for hit in ranked
@@ -167,26 +173,35 @@ def citable_slugs(ranked: list[RerankHit]) -> list[str]:
     ]
 
 
-def build_generation_response_schema(candidate_slugs: list[str]) -> dict:
-    """Groq strict json_schema for the generation call, used only once `candidate_slugs` is
-    non-empty (an empty `enum` is unsatisfiable, so the plain free-text call is used instead
-    when there's nothing citable -- see graph.py's answer_node).
+MALFORMED_REPLY = "Sorry, I couldn't put that answer together properly -- could you ask me again?"
 
-    `answer` carries the guest-facing reply exactly as GENERATION_SYSTEM_PROMPT's rules
-    already describe it; `cited_slugs` is the model's own report, per CITATION_OUTPUT_
-    INSTRUCTIONS, of which of those rows its answer actually discusses or refers to -- this
-    catches an implicit reference (a pronoun, a shortened name) that scanning the answer text
-    for an exact name match after the fact would miss.
+
+def parse_generation_reply(text: str, candidate_slugs: list[str]) -> tuple[str, list[str]] | None:
+    """Parse the generation call's {"answer": ..., "cited_slugs": [...]} reply, or None.
+
+    The reply shape is requested by CITATION_OUTPUT_INSTRUCTIONS but is not enforced by the API:
+    Groq stops streaming tokens whenever a `response_format` (even a non-strict one) is set, so
+    the answer could not be shown as it is written. Hence the tolerance here -- a stray code
+    fence or a sentence around the object is ignored -- and the filtering of `cited_slugs` to
+    `candidate_slugs`, which the schema's enum used to guarantee. `cited_slugs` is the model's
+    own report of which retrieved rows its answer discusses, which catches an implicit reference
+    (a pronoun, a shortened name) that scanning the answer text for an exact name match would
+    miss.
     """
-    return {
-        "type": "object",
-        "properties": {
-            "answer": {"type": "string"},
-            "cited_slugs": {"type": "array", "items": {"type": "string", "enum": candidate_slugs}},
-        },
-        "required": ["answer", "cited_slugs"],
-        "additionalProperties": False,
-    }
+    candidates = [text]
+    first, last = text.find("{"), text.rfind("}")
+    if 0 <= first < last:
+        candidates.append(text[first : last + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("answer"), str):
+            slugs = parsed.get("cited_slugs")
+            cited = [x for x in slugs if x in candidate_slugs] if isinstance(slugs, list) else []
+            return parsed["answer"], cited
+    return None
 
 
 class CitedItem(TypedDict):
@@ -316,3 +331,165 @@ def contains_system_prompt_leak(
         if window in answer_lower:
             return True
     return False
+
+
+_ANSWER_KEY = re.compile(r'"answer"\s*:\s*"')
+_SIMPLE_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+_REPLACEMENT_CHAR = "\ufffd"
+
+
+class AnswerStreamDecoder:
+    """Pull the guest-facing answer text out of a streamed generation reply, as it arrives.
+
+    With json_mode=True the model is producing the {"answer": ..., "cited_slugs": [...]} object
+    (see CITATION_OUTPUT_INSTRUCTIONS), so the raw stream is JSON, not prose:
+    this finds the `"answer"` string and decodes it incrementally -- escapes (including \\uXXXX
+    and surrogate pairs) that are split across chunks wait for their remaining characters --
+    and stops at its closing quote, so `cited_slugs` is never shown to the guest. With
+    json_mode=False (the plain free-text call) the stream already is the answer.
+
+    This only drives what the guest *watches* appear; the authoritative answer and citations
+    still come from parsing the complete reply once the stream ends (graph.py's answer_node).
+    """
+
+    def __init__(self, *, json_mode: bool) -> None:
+        self._json_mode = json_mode
+        self._buffer = ""
+        self._in_answer = False
+        self.finished = False
+        self.text = ""  # everything decoded so far
+
+    def feed(self, chunk: str) -> str:
+        """Return the newly decodable answer text this chunk completes (possibly empty)."""
+        decoded = self._feed(chunk)
+        self.text += decoded
+        return decoded
+
+    def _feed(self, chunk: str) -> str:
+        if not self._json_mode:
+            return chunk
+        if self.finished:
+            return ""
+        self._buffer += chunk
+        if not self._in_answer:
+            match = _ANSWER_KEY.search(self._buffer)
+            if match is None:
+                return ""
+            self._buffer = self._buffer[match.end() :]
+            self._in_answer = True
+        return self._decode_available()
+
+    def _decode_available(self) -> str:
+        buf = self._buffer
+        out: list[str] = []
+        i = 0
+        while i < len(buf):
+            ch = buf[i]
+            if ch == '"':
+                self.finished = True
+                i = len(buf)
+                break
+            if ch != "\\":
+                out.append(ch)
+                i += 1
+                continue
+            if i + 1 >= len(buf):
+                break  # a lone backslash: its escape character hasn't arrived yet
+            kind = buf[i + 1]
+            if kind in _SIMPLE_ESCAPES:
+                out.append(_SIMPLE_ESCAPES[kind])
+                i += 2
+            elif kind == "u":
+                if i + 6 > len(buf):
+                    break
+                decoded, consumed = self._decode_unicode_escape(buf, i)
+                if consumed == 0:
+                    break  # a high surrogate still waiting for its low half
+                out.append(decoded)
+                i += consumed
+            else:
+                out.append(kind)  # not valid JSON; keep the character rather than fail
+                i += 2
+        self._buffer = buf[i:]
+        return "".join(out)
+
+    @staticmethod
+    def _decode_unicode_escape(buf: str, i: int) -> tuple[str, int]:
+        """Decode the \\uXXXX escape at buf[i]; returns (text, characters consumed), or
+        ("", 0) when it's a high surrogate whose low half hasn't fully arrived yet."""
+        try:
+            code = int(buf[i + 2 : i + 6], 16)
+        except ValueError:
+            return _REPLACEMENT_CHAR, 6
+        if 0xD800 <= code <= 0xDBFF:
+            following = buf[i + 6 : i + 8]
+            if following and not "\\u".startswith(following):
+                return _REPLACEMENT_CHAR, 6  # no low half is coming
+            if i + 12 > len(buf):
+                return "", 0
+            try:
+                low = int(buf[i + 8 : i + 12], 16)
+            except ValueError:
+                return _REPLACEMENT_CHAR, 6
+            if not 0xDC00 <= low <= 0xDFFF:
+                return _REPLACEMENT_CHAR, 6
+            return chr(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)), 12
+        if 0xDC00 <= code <= 0xDFFF:
+            return _REPLACEMENT_CHAR, 6  # a low surrogate with no high half before it
+        return chr(code), 6
+
+
+class LeakHoldback:
+    """Release streamed reply text a few words behind the model, so the output-side
+    system-prompt leak check (contains_system_prompt_leak) can still fire *before* the leaked
+    words reach the guest.
+
+    The check flags a run of `window_words` consecutive words from the prompt. Holding back the
+    most recent `window_words` words means that when the last word of such a run arrives (and
+    push() flags it), the run's first word has not been released yet -- nothing of the leaked
+    run has been shown. The lag is only a handful of words at the very start of a reply.
+    """
+
+    def __init__(
+        self, reference: str, *, window_words: int = SYSTEM_PROMPT_LEAK_WINDOW_WORDS
+    ) -> None:
+        self._reference = reference
+        self._window_words = window_words
+        self._text = ""
+        self._released = 0
+        self.leaked = False
+
+    def push(self, text: str) -> str:
+        """Add newly decoded reply text; return whatever is now safe to show the guest."""
+        if self.leaked or not text:
+            return ""
+        self._text += text
+        if contains_system_prompt_leak(
+            self._reference, self._text, window_words=self._window_words
+        ):
+            self.leaked = True
+            return ""
+        word_starts = [m.start() for m in re.finditer(r"\S+", self._text)]
+        if len(word_starts) <= self._window_words:
+            return ""
+        boundary = word_starts[-self._window_words]
+        released = self._text[self._released : boundary]
+        self._released = boundary
+        return released
+
+    def flush(self) -> str:
+        """The held-back tail. Call only once the complete reply has passed the final check."""
+        if self.leaked:
+            return ""
+        tail = self._text[self._released :]
+        self._released = len(self._text)
+        return tail

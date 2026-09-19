@@ -1,5 +1,10 @@
+import math
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
+
+import httpx
+import pytest
 
 from app.retrieval import (
     MenuRow,
@@ -217,3 +222,83 @@ def test_search_relaxes_constraints_when_nothing_clears_gate(monkeypatch: Any) -
 
     assert result["relaxed_fields"] == ["kcal_max", "protein_min_g"]
     assert result["answerable"] is False
+
+
+def _rerank_tool(handler: Callable[[httpx.Request], httpx.Response]) -> RetrievalTool:
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    return RetrievalTool(kb=cast(Any, None), cohere_api_key=" cohere-key ", http_client=client)
+
+
+@pytest.fixture
+def _no_real_sleeping(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Neither the pacing wait nor the 429 backoff may actually sleep in a test."""
+    waits: list[float] = []
+    monkeypatch.setattr("app.retrieval.time.sleep", waits.append)
+    return waits
+
+
+def test_rerank_posts_to_cohere_and_maps_results_back_to_rows(
+    _no_real_sleeping: list[float],
+) -> None:
+    rows = [make_row("miso ramen", score=0.4), make_row("katsu curry", score=0.7)]
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"index": 1, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.2},
+                ],
+                "meta": {"billed_units": {"search_units": 1}},
+            },
+        )
+
+    hits, units = _rerank_tool(handler).rerank("curry", rows)
+
+    assert [h["row"]["properties"]["name"] for h in hits] == ["katsu curry", "miso ramen"]
+    assert hits[0]["rerank"] == 0.9
+    assert hits[0]["hybrid"] == 0.7
+    assert units == 1
+    assert seen[0].headers["Authorization"] == "Bearer cohere-key"
+
+
+def test_rerank_retries_a_429_then_succeeds(_no_real_sleeping: list[float]) -> None:
+    responses = [
+        httpx.Response(429, json={}),
+        httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.8}]}),
+    ]
+
+    hits, _ = _rerank_tool(lambda r: responses.pop(0)).rerank("ramen", [make_row("ramen")])
+
+    assert hits[0]["rerank"] == 0.8
+    assert 2 in _no_real_sleeping  # the first backoff step
+
+
+def test_rerank_falls_back_to_hybrid_order_on_a_non_retryable_status(
+    _no_real_sleeping: list[float],
+) -> None:
+    rows = [make_row("a", score=0.9), make_row("b", score=0.5)]
+
+    hits, units = _rerank_tool(lambda r: httpx.Response(401, json={})).rerank("q", rows)
+
+    assert [h["row"]["properties"]["name"] for h in hits] == ["a", "b"]
+    assert all(math.isnan(h["rerank"]) for h in hits)
+    assert units == 0
+
+
+def test_rerank_lets_a_connection_failure_propagate(_no_real_sleeping: list[float]) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("down", request=request)
+
+    with pytest.raises(httpx.ConnectError):
+        _rerank_tool(handler).rerank("q", [make_row("a")])
+
+
+def test_rerank_skips_the_call_entirely_when_there_is_nothing_to_rank() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request expected")
+
+    assert _rerank_tool(handler).rerank("q", []) == ([], 0)

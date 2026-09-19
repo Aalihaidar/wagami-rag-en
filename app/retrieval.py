@@ -18,10 +18,9 @@ so this module's logic can be unit-tested without a live LLM.
 import json
 import math
 import time
-import urllib.error
-import urllib.request
 from typing import Any, TypedDict, cast
 
+import httpx
 import weaviate
 from weaviate import WeaviateClient
 from weaviate.classes.init import AdditionalConfig, Auth, Timeout
@@ -29,6 +28,7 @@ from weaviate.classes.query import Filter, FilterReturn, MetadataQuery
 from weaviate.collections import Collection
 
 from app.config import Settings
+from app.timing import timed
 
 FIELDS = [
     "name",
@@ -56,6 +56,7 @@ GATE = 0.15
 RERANK_MODEL = "rerank-v3.5"
 COHERE_MAX_RPM = 15.0  # client-side pacing cap for rerank() -- edit to match your key's quota
 COHERE_RERANK_URL = "https://api.cohere.com/v2/rerank"
+COHERE_HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 RELAXABLE_FIELDS = [
     "kcal_max",
@@ -227,10 +228,21 @@ class RetrievalTool:
     rather than recreated per call.
     """
 
-    def __init__(self, kb: Collection, cohere_api_key: str) -> None:
+    def __init__(
+        self,
+        kb: Collection,
+        cohere_api_key: str,
+        http_client: httpx.Client | None = None,
+    ) -> None:
         self._kb = kb
         self._cohere_api_key = cohere_api_key
         self._last_cohere_call_at = 0.0
+        # Shared keep-alive pool for rerank calls instead of a fresh TCP+TLS handshake each
+        # time (~110ms to api.cohere.com, measured); httpx.Client is thread-safe.
+        self._http = http_client or httpx.Client(timeout=COHERE_HTTP_TIMEOUT)
+
+    def close(self) -> None:
+        self._http.close()
 
     def retrieve(
         self,
@@ -245,14 +257,15 @@ class RetrievalTool:
         Converts every hit to a plain MenuRow immediately -- see MenuRow's docstring for why
         the live SDK object never leaves this method.
         """
-        objs = self._kb.query.hybrid(
-            query=query,
-            alpha=alpha,
-            limit=k,
-            filters=filters,
-            return_properties=FIELDS,
-            return_metadata=MetadataQuery(score=True),
-        ).objects
+        with timed("weaviate"):
+            objs = self._kb.query.hybrid(
+                query=query,
+                alpha=alpha,
+                limit=k,
+                filters=filters,
+                return_properties=FIELDS,
+                return_metadata=MetadataQuery(score=True),
+            ).objects
         return [
             {
                 "uuid": str(o.uuid),
@@ -266,7 +279,8 @@ class RetrievalTool:
         """Block just long enough to keep rerank() under COHERE_MAX_RPM requests/minute."""
         wait = (60.0 / COHERE_MAX_RPM) - (time.monotonic() - self._last_cohere_call_at)
         if wait > 0:
-            time.sleep(wait)
+            with timed("rerank_pace"):
+                time.sleep(wait)
         self._last_cohere_call_at = time.monotonic()
 
     def rerank(
@@ -296,27 +310,25 @@ class RetrievalTool:
         for attempt in range(4):
             self._pace_cohere_call()
             try:
-                req = urllib.request.Request(
+                resp = self._http.post(
                     COHERE_RERANK_URL,
-                    data=payload,
+                    content=payload,
                     headers={
                         "Authorization": f"Bearer {self._cohere_api_key.strip()}",
                         "Content-Type": "application/json",
-                        # Cohere sits behind infrastructure that blocks Python's default
-                        # urllib User-Agent -- see docs/APP_AND_DEPLOYMENT_PLAN.md / the
-                        # Groq notebooks' own note on the same Cloudflare behavior.
+                        # Cohere sits behind infrastructure that blocks a bare library-default
+                        # User-Agent -- see docs/APP_AND_DEPLOYMENT_PLAN.md / the Groq
+                        # notebooks' own note on the same Cloudflare behavior.
                         "User-Agent": "wagami-rag-en/app.retrieval",
                     },
-                    method="POST",
                 )
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    data = json.load(resp)
+                resp.raise_for_status()
+                data = resp.json()
                 results = data["results"]
                 search_units = data.get("meta", {}).get("billed_units", {}).get("search_units", 0)
                 break
-            except urllib.error.HTTPError as e:
-                retryable = e.code == 429 and attempt < 3
-                e.close()
+            except httpx.HTTPStatusError as e:
+                retryable = e.response.status_code == 429 and attempt < 3
                 if retryable:
                     time.sleep(2 * 4**attempt)
                 else:
@@ -354,7 +366,8 @@ class RetrievalTool:
             search_text = build_search_text(current)
             objs = self.retrieve(search_text, filters=server_filter)
             kept = [o for o in objs if not (allergen_set(o) & exclude)] if exclude else objs
-            ranked, search_units = self.rerank(search_text, kept)
+            with timed("rerank"):
+                ranked, search_units = self.rerank(search_text, kept)
             total_search_units += search_units
             top = ranked[0]["rerank"] if ranked else 0.0
             answerable = bool(ranked) if math.isnan(top) else top >= gate

@@ -8,14 +8,16 @@ a second shape alongside it.
 """
 
 import logging
-import urllib.error
 
+import httpx
 import redis.exceptions
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from weaviate.exceptions import WeaviateBaseError
+
+from app.agent.llm import LLMStreamError
 
 logger = logging.getLogger("app.errors")
 
@@ -27,14 +29,15 @@ OUTBOUND_ERROR_REPLY = (
 )
 
 # Transient failures from the app's three outbound dependencies (Weaviate, the Cohere/Groq
-# urllib calls, Redis) -- app/main.py's _run_chat_turn() catches exactly this tuple around
+# httpx calls, Redis) -- app/main.py's _run_chat_turn() catches exactly this tuple around
 # graph.invoke() and returns OUTBOUND_ERROR_REPLY instead of letting it fall through to the
 # generic 500 handler below. Deliberately not `Exception` itself: a genuine programming bug
 # should still surface as a 500 (and get logged as one), not be silently smoothed over as "the
 # backend is busy."
 TRANSIENT_OUTBOUND_ERRORS: tuple[type[Exception], ...] = (
     WeaviateBaseError,
-    urllib.error.URLError,  # covers HTTPError too (Cohere rerank / Groq calls)
+    httpx.HTTPError,  # status errors and transport errors/timeouts (Cohere rerank / Groq calls)
+    LLMStreamError,  # Groq reporting an error inside an already-open answer stream
     redis.exceptions.RedisError,
     TimeoutError,
 )

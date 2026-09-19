@@ -8,6 +8,7 @@ from app.agent.graph import build_graph
 from app.agent.llm import LLMResponse, Usage
 from app.agent.understanding import CategoryIndex
 from app.retrieval import RetrievalTool
+from app.timing import track_timings
 
 
 def make_category_index() -> CategoryIndex:
@@ -54,7 +55,40 @@ def make_obj(name: str, score: float = 0.9, *, image: str = "") -> Any:
     )
 
 
-class FakeGroqClient:
+class FakeLLMStream:
+    """Stand-in for app.agent.llm.LLMStream: yields `text` in small chunks, like a live stream."""
+
+    def __init__(self, text: str, usage: Usage, chunk_size: int = 6) -> None:
+        self._chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+        self.usage = usage
+        self.closed = False
+        self.chunks_consumed = 0
+
+    def __iter__(self) -> Any:
+        for chunk in self._chunks:
+            self.chunks_consumed += 1
+            yield chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class StreamsViaCall:
+    """Gives a fake client a stream() that replays whatever its own call() would have
+    returned, so each fake's call bookkeeping and canned responses apply to both paths."""
+
+    streams: list[FakeLLMStream]
+
+    def stream(self, system_prompt: str, user_prompt: str, **kwargs: Any) -> FakeLLMStream:
+        response = self.call(system_prompt, user_prompt, **kwargs)  # type: ignore[attr-defined]
+        stream = FakeLLMStream(response["text"], response["usage"])
+        if not hasattr(self, "streams"):
+            self.streams = []
+        self.streams.append(stream)
+        return stream
+
+
+class FakeGroqClient(StreamsViaCall):
     """Returns understand_query()'s expected JSON on the first call (response_schema set),
     and a canned answer string on the second (free-text generation call)."""
 
@@ -118,6 +152,41 @@ def test_graph_runs_end_to_end_with_fake_llm_and_retrieval(monkeypatch: Any) -> 
     assert final_state["answer"] == "Our vegan ramen is £9.50."
     assert final_state["usage"]["total_tokens"] == 30  # 15 (understand) + 15 (generate)
     assert len(groq_client.calls) == 2
+    assert groq_client.calls[1]["reasoning_effort"] == "low"  # generation call
+
+
+def test_graph_records_per_stage_timings_for_each_node(monkeypatch: Any) -> None:
+    """The timings must survive LangGraph's own node execution (which copies the context) so
+    /chat's per-turn log can break a slow turn down by stage."""
+    kb = FakeKB([make_obj("vegan ramen")])
+    tool = RetrievalTool(kb=kb, cohere_api_key="")  # type: ignore[arg-type]
+    monkeypatch.setattr(tool, "rerank", _no_rerank)
+    understanding_json = json.dumps(
+        {
+            "intent": "menu",
+            "dietary": None,
+            "price_max_gbp": None,
+            "allergens_exclude": [],
+            "search_query": "ramen",
+            "category_hint": [],
+            "gluten_free_only": False,
+            "kcal_max": None,
+            "protein_min_g": None,
+            "alcohol_free": False,
+        }
+    )
+    graph = build_graph(
+        retrieval_tool=tool,
+        category_index=make_category_index(),
+        groq_client=FakeGroqClient(understanding_json, "ok"),  # type: ignore[arg-type]
+        understand_model="openai/gpt-oss-120b",
+        generation_model="openai/gpt-oss-120b",
+    )
+
+    with track_timings() as timings:
+        graph.invoke({"question": "ramen"})
+
+    assert {"understand", "weaviate", "rerank", "generate"} <= set(timings)
 
 
 def test_graph_substitutes_safe_fallback_when_generation_leaks_system_prompt(
@@ -165,11 +234,11 @@ def test_graph_substitutes_safe_fallback_when_generation_leaks_system_prompt(
     ]
 
 
-class SequencedFakeGroqClient:
+class SequencedFakeGroqClient(StreamsViaCall):
     """Returns each of `responses` in order, one per call -- for tests where the understand
-    and generate calls need genuinely different JSON bodies (both now pass response_schema
-    once a citable candidate exists, so FakeGroqClient's schema-presence branching above
-    can't tell them apart)."""
+    and generate calls need genuinely different JSON bodies (a JSON-shaped generation reply is
+    no longer marked by a response_schema, so FakeGroqClient's schema-presence branching above
+    can't be used to tell the two apart)."""
 
     def __init__(self, responses: list[str]) -> None:
         self._responses = list(responses)
@@ -234,9 +303,11 @@ def test_graph_cites_a_dish_referred_to_implicitly_via_structured_output(
 
     assert final_state["answer"] == "It's £2.50."
     assert final_state["cited_slugs"] == ["double-espresso"]
-    assert groq_client.calls[1]["response_schema"]["properties"]["cited_slugs"]["items"][
-        "enum"
-    ] == ["double-espresso"]
+    # The reply shape is requested in the prompt, not enforced with a response_format -- Groq
+    # stops streaming tokens whenever one is set.
+    assert groq_client.calls[1]["response_schema"] is None
+    assert "cited_slugs" in groq_client.calls[1]["system_prompt"]
+    assert "(slug: double-espresso)" in groq_client.calls[1]["user_prompt"]
 
 
 def test_graph_falls_back_without_a_configured_llm(monkeypatch: Any) -> None:
@@ -306,3 +377,154 @@ def test_graph_persists_history_across_turns_with_a_checkpointer(monkeypatch: An
         assert sent.startswith("Recent conversation so far")
         assert "what's in the vegan ramen" in sent
         assert sent.endswith("Guest's new message: how much is it")
+
+
+def _streaming_graph(monkeypatch: Any, groq_client: Any, *, image: str = "") -> Any:
+    kb = FakeKB([make_obj("double espresso", image=image)])
+    tool = RetrievalTool(kb=kb, cohere_api_key="")  # type: ignore[arg-type]
+    monkeypatch.setattr(tool, "rerank", _no_rerank)
+    return build_graph(
+        retrieval_tool=tool,
+        category_index=make_category_index(),
+        groq_client=groq_client,
+        understand_model="openai/gpt-oss-120b",
+        generation_model="openai/gpt-oss-120b",
+    )
+
+
+_ESPRESSO_UNDERSTANDING = json.dumps(
+    {
+        "intent": "menu",
+        "dietary": None,
+        "price_max_gbp": None,
+        "allergens_exclude": [],
+        "search_query": "double espresso",
+        "category_hint": [],
+        "gluten_free_only": False,
+        "kcal_max": None,
+        "protein_min_g": None,
+        "alcohol_free": False,
+    }
+)
+
+
+def _run_streaming(graph: Any) -> tuple[list[str], dict[str, Any]]:
+    deltas: list[str] = []
+    final: dict[str, Any] = {}
+    for mode, chunk in graph.stream(
+        {"question": "how much is the espresso"}, stream_mode=["custom", "values"]
+    ):
+        if mode == "custom":
+            deltas.append(chunk["delta"])
+        else:
+            final = chunk
+    return deltas, final
+
+
+def test_graph_streams_the_answer_text_as_it_is_generated(monkeypatch: Any) -> None:
+    reply = "The double espresso is £2.50 and comes as a single shot."
+    groq_client = FakeGroqClient(_ESPRESSO_UNDERSTANDING, reply)
+    graph = _streaming_graph(monkeypatch, groq_client)
+
+    deltas, final = _run_streaming(graph)
+
+    assert len(deltas) > 1
+    assert "".join(deltas) == reply == final["answer"]
+    assert groq_client.streams[0].closed
+
+
+def test_graph_streams_only_the_answer_field_of_the_structured_reply(monkeypatch: Any) -> None:
+    generation_json = json.dumps({"answer": "It's £2.50.", "cited_slugs": ["double-espresso"]})
+    groq_client = SequencedFakeGroqClient([_ESPRESSO_UNDERSTANDING, generation_json])
+    graph = _streaming_graph(monkeypatch, groq_client, image="e.png")
+
+    deltas, final = _run_streaming(graph)
+
+    assert "".join(deltas) == "It's £2.50." == final["answer"]
+    assert final["cited_slugs"] == ["double-espresso"]
+    assert not any("cited_slugs" in d or "{" in d for d in deltas)
+
+
+def test_graph_stops_streaming_and_swaps_in_the_fallback_when_a_leak_starts(
+    monkeypatch: Any,
+) -> None:
+    from app.agent.generation import SAFE_FALLBACK_REPLY, SCOPE_AND_SAFETY
+
+    leaked_words = SCOPE_AND_SAFETY.split()[:40]
+    reply = "Sure, here it is: " + " ".join(leaked_words)
+    groq_client = FakeGroqClient(_ESPRESSO_UNDERSTANDING, reply)
+    graph = _streaming_graph(monkeypatch, groq_client)
+
+    deltas, final = _run_streaming(graph)
+
+    assert final["answer"] == SAFE_FALLBACK_REPLY
+    shown = "".join(deltas)
+    # Nothing beyond the innocent lead-in ever reached the guest, and the model was cut off
+    # rather than read to the end.
+    assert leaked_words[0] not in shown
+    assert not any(" ".join(leaked_words[i : i + 8]) in shown for i in range(len(leaked_words) - 7))
+    stream = groq_client.streams[0]
+    assert stream.closed
+    assert stream.chunks_consumed < len(list(FakeLLMStream(reply, stream.usage)))
+
+
+def test_graph_invoke_without_streaming_is_unaffected_by_the_stream_writer(
+    monkeypatch: Any,
+) -> None:
+    groq_client = FakeGroqClient(_ESPRESSO_UNDERSTANDING, "Two pounds fifty.")
+    graph = _streaming_graph(monkeypatch, groq_client)
+
+    final = graph.invoke({"question": "how much is the espresso"})
+
+    assert final["answer"] == "Two pounds fifty."
+
+
+def _malformed_generation_graph(monkeypatch: Any, generation_text: str) -> tuple[Any, Any]:
+    groq_client = SequencedFakeGroqClient([_ESPRESSO_UNDERSTANDING, generation_text])
+    return _streaming_graph(monkeypatch, groq_client, image="e.png"), groq_client
+
+
+def test_graph_keeps_the_streamed_answer_when_the_json_is_cut_off_after_it(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    cut_off = '{"answer": "It\'s £2.50.", "cited_slugs": ['
+    graph, _ = _malformed_generation_graph(monkeypatch, cut_off)
+
+    with caplog.at_level("WARNING", logger="app.agent.graph"):
+        deltas, final = _run_streaming(graph)
+
+    assert final["answer"] == "It's £2.50." == "".join(deltas)
+    assert final["cited_slugs"] == []
+    assert "not the requested JSON" in caplog.text
+
+
+def test_graph_uses_a_plain_prose_reply_as_the_answer(monkeypatch: Any) -> None:
+    graph, _ = _malformed_generation_graph(monkeypatch, "The double espresso is £2.50.")
+
+    deltas, final = _run_streaming(graph)
+
+    assert final["answer"] == "The double espresso is £2.50."
+    assert final["cited_slugs"] == []
+    assert deltas == []  # nothing was shown as it arrived: it never looked like the JSON object
+
+
+def test_graph_apologises_instead_of_showing_unparseable_json(monkeypatch: Any) -> None:
+    from app.agent.generation import MALFORMED_REPLY
+
+    graph, _ = _malformed_generation_graph(monkeypatch, "{oops this is not json")
+
+    deltas, final = _run_streaming(graph)
+
+    assert final["answer"] == MALFORMED_REPLY
+    assert deltas == []
+
+
+def test_graph_ignores_cited_slugs_the_model_invented(monkeypatch: Any) -> None:
+    generation_json = json.dumps(
+        {"answer": "It's £2.50.", "cited_slugs": ["double-espresso", "made-up-dish"]}
+    )
+    graph, _ = _malformed_generation_graph(monkeypatch, generation_json)
+
+    _, final = _run_streaming(graph)
+
+    assert final["cited_slugs"] == ["double-espresso"]

@@ -13,31 +13,39 @@ would need human-in-the-loop approval. If a future feature ever adds a write-cap
 (order placement, reservation booking), re-read that whole section before shipping it.
 """
 
-import json
+import logging
 import operator
 from typing import Annotated, Any, Required, TypedDict
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.agent.generation import (
     CITATION_OUTPUT_INSTRUCTIONS,
+    GENERATION_REASONING_EFFORT,
     GENERATION_SYSTEM_PROMPT,
+    MALFORMED_REPLY,
     SAFE_FALLBACK_REPLY,
     SCOPE_AND_SAFETY,
+    AnswerStreamDecoder,
+    LeakHoldback,
     build_context,
-    build_generation_response_schema,
     build_user_prompt,
     citable_slugs,
     contains_system_prompt_leak,
+    parse_generation_reply,
     temperature_for,
     tone_for,
 )
-from app.agent.llm import GroqClient, zero_usage
+from app.agent.llm import GroqClient, Usage, zero_usage
 from app.agent.memory import HistoryTurn, build_history_context
 from app.agent.understanding import CategoryIndex, UnderstandingResult, understand_query
 from app.retrieval import RetrievalTool, SearchResult
+from app.timing import timed
+
+logger = logging.getLogger("app.agent.graph")
 
 
 class AgentState(TypedDict, total=False):
@@ -64,6 +72,89 @@ class AgentState(TypedDict, total=False):
     usage: dict[str, Any]
 
 
+def _generate_answer(
+    groq_client: GroqClient,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    model: str,
+    temperature: float,
+    candidate_slugs: list[str],
+) -> tuple[str, list[str], Usage]:
+    """Run the generation call as a stream; returns (reply, cited_slugs, usage).
+
+    Every call streams, whether or not anyone is watching: each chunk of guest-visible text is
+    handed to LangGraph's custom stream writer (a no-op unless the caller asked for
+    stream_mode="custom", as /chat/stream does), so /chat and /chat/stream run one and the same
+    generation path. The returned reply is always the authoritative one, parsed from the
+    complete stream -- what was streamed is only a live preview of it.
+
+    Output-side check (Section 3): defense-in-depth behind the system prompt's own "never reveal
+    yourself" instruction, not a replacement for it. Checked against SCOPE_AND_SAFETY
+    specifically, not the full system_prompt -- GENERATION_RULES (the other half of
+    GENERATION_SYSTEM_PROMPT) deliberately instructs content that's supposed to reach the guest
+    almost verbatim (e.g. the demo/limited-data decline wording), so scanning the reply against
+    it produces false positives. Streaming would otherwise show a leak before this check could
+    run, so LeakHoldback releases text a few words behind the model and stops the stream the
+    moment a leak is flagged.
+    """
+    write = get_stream_writer()
+    json_mode = bool(candidate_slugs)
+    decoder = AnswerStreamDecoder(json_mode=json_mode)
+    guard = LeakHoldback(SCOPE_AND_SAFETY)
+    raw: list[str] = []
+
+    with timed("generate"):
+        # No response_format on purpose: Groq only streams tokens when none is set (see
+        # parse_generation_reply()); the reply shape comes from the system prompt instead.
+        stream = groq_client.stream(
+            system_prompt,
+            user_prompt,
+            model=model,
+            temperature=temperature,
+            reasoning_effort=GENERATION_REASONING_EFFORT,
+        )
+        try:
+            for piece in stream:
+                raw.append(piece)
+                visible = guard.push(decoder.feed(piece))
+                if visible:
+                    write({"delta": visible})
+                if guard.leaked:
+                    break
+        finally:
+            stream.close()
+
+    if guard.leaked:
+        return SAFE_FALLBACK_REPLY, [], stream.usage
+
+    text = "".join(raw).strip()
+    cited_slugs: list[str] = []
+    if json_mode:
+        parsed = parse_generation_reply(text, candidate_slugs)
+        if parsed is not None:
+            reply, cited_slugs = parsed
+        else:
+            # The model didn't produce the requested JSON. Keep whatever is still usable, and
+            # log it -- a rising rate of these means the prompt-only format has stopped holding.
+            logger.warning("Generation reply was not the requested JSON object")
+            if decoder.text:
+                reply = decoder.text
+            elif text.startswith(("{", "`")):
+                reply = MALFORMED_REPLY
+            else:
+                reply = text
+    else:
+        reply = text
+    if contains_system_prompt_leak(SCOPE_AND_SAFETY, reply):
+        return SAFE_FALLBACK_REPLY, [], stream.usage
+
+    tail = guard.flush()
+    if tail:
+        write({"delta": tail})
+    return reply, cited_slugs, stream.usage
+
+
 def build_graph(
     *,
     retrieval_tool: RetrievalTool,
@@ -86,13 +177,14 @@ def build_graph(
 
     def query_node(state: AgentState) -> dict[str, Any]:
         history_context = build_history_context(state.get("history", []))
-        understanding = understand_query(
-            state["question"],
-            category_index=category_index,
-            groq_client=groq_client,
-            model=understand_model,
-            context=history_context,
-        )
+        with timed("understand"):
+            understanding = understand_query(
+                state["question"],
+                category_index=category_index,
+                groq_client=groq_client,
+                model=understand_model,
+                context=history_context,
+            )
         return {"understanding": understanding}
 
     def retrieve_node(state: AgentState) -> dict[str, Any]:
@@ -133,36 +225,14 @@ def build_graph(
             cited_slugs: list[str] = []
             gen_usage = zero_usage()
         else:
-            if candidate_slugs:
-                gen = groq_client.call(
-                    state["system_prompt"],
-                    state["user_prompt"],
-                    model=generation_model,
-                    temperature=state["temperature"],
-                    response_schema=build_generation_response_schema(candidate_slugs),
-                )
-                parsed = json.loads(gen["text"])
-                reply = parsed.get("answer", "")
-                cited_slugs = [s for s in parsed.get("cited_slugs", []) if s in candidate_slugs]
-            else:
-                gen = groq_client.call(
-                    state["system_prompt"],
-                    state["user_prompt"],
-                    model=generation_model,
-                    temperature=state["temperature"],
-                )
-                reply = gen["text"]
-                cited_slugs = []
-            gen_usage = gen["usage"]
-            # Output-side check (Section 3): defense-in-depth behind the system prompt's own
-            # "never reveal yourself" instruction, not a replacement for it. Checked against
-            # SCOPE_AND_SAFETY specifically, not the full system_prompt -- GENERATION_RULES
-            # (the other half of GENERATION_SYSTEM_PROMPT) deliberately instructs content
-            # that's supposed to reach the guest almost verbatim (e.g. the demo/limited-data
-            # decline wording), so scanning the reply against it produces false positives.
-            if contains_system_prompt_leak(SCOPE_AND_SAFETY, reply):
-                reply = SAFE_FALLBACK_REPLY
-                cited_slugs = []
+            reply, cited_slugs, gen_usage = _generate_answer(
+                groq_client,
+                state["system_prompt"],
+                state["user_prompt"],
+                model=generation_model,
+                temperature=state["temperature"],
+                candidate_slugs=candidate_slugs,
+            )
         usage = {
             "understand": understand_usage,
             "generate": gen_usage,
