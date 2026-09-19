@@ -1,14 +1,16 @@
 import asyncio
+import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from langchain_core.runnables import RunnableConfig
@@ -18,7 +20,8 @@ from redis import Redis
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-from starlette.concurrency import run_in_threadpool
+from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
+from starlette.types import Receive, Scope, Send
 
 from app.agent.checkpointer import build_checkpointer
 from app.agent.generation import CitedItem as GeneratedCitedItem
@@ -33,10 +36,16 @@ from app.cost_control import (
     is_over_spend_limit,
     record_token_usage,
 )
-from app.errors import OUTBOUND_ERROR_REPLY, TRANSIENT_OUTBOUND_ERRORS, register_exception_handlers
+from app.errors import (
+    INTERNAL_ERROR_MESSAGE,
+    OUTBOUND_ERROR_REPLY,
+    TRANSIENT_OUTBOUND_ERRORS,
+    register_exception_handlers,
+)
 from app.logging_config import configure_logging
 from app.retrieval import RetrievalTool, connect
 from app.schemas import ChatRequest, ChatResponse, CitedItem, SessionResponse
+from app.timing import timed, track_timings
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -84,6 +93,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     weaviate_client = connect(settings)
     redis_client = Redis.from_url(settings.redis_url)
+    retrieval_tool: RetrievalTool | None = None
+    groq_client: GroqClient | None = None
     try:
         kb = weaviate_client.collections.get("KnowledgeBase")
         retrieval_tool = RetrievalTool(kb=kb, cohere_api_key=settings.embedding_api_key)
@@ -105,6 +116,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             yield
     finally:
+        # The keep-alive HTTP pools behind Cohere rerank and Groq.
+        if retrieval_tool is not None:
+            retrieval_tool.close()
+        if groq_client is not None:
+            groq_client.close()
         weaviate_client.close()
         redis_client.close()
 
@@ -281,6 +297,45 @@ def _image_url(filename: str) -> str:
     return f"{settings.image_base_url.rstrip('/')}/{filename}"
 
 
+def _log_turn_timings(timings: dict[str, float]) -> None:
+    """One PII-free line per /chat turn breaking its latency down by stage, in ms.
+
+    `turn` is the whole threadpool hop (so it also includes any wait for a free worker thread);
+    `graph` is graph.invoke() alone, whose remainder after understand + weaviate + rerank +
+    generate is LangGraph overhead plus the checkpointer's Redis write. `rerank_pace` and
+    `llm_backoff` are waits nested inside `rerank` / `understand` / `generate` -- see
+    app/timing.py. Stages a turn never reached (e.g. rerank on a capped conversation) are
+    simply absent.
+
+    For /chat/stream, `graph` spans the whole stream and `first_delta` is the time until the
+    guest first sees text.
+    """
+    logger.info(
+        "chat turn timings",
+        extra={"timings_ms": {stage: round(ms, 1) for stage, ms in timings.items()}},
+    )
+
+
+def _precheck_reply(
+    graph: CompiledStateGraph, redis_client: Redis, config: RunnableConfig
+) -> str | None:
+    """A fixed guest-facing reply if this turn must not reach the LLM at all -- the
+    conversation-turn cap or the spend cap is already hit -- else None."""
+    with timed("state_read"):
+        snapshot = graph.get_state(config)
+    history = (snapshot.values or {}).get("history", [])
+    if len(history) >= settings.max_conversation_turns:
+        return CONVERSATION_LIMIT_REPLY
+
+    with timed("cost_check"):
+        over_spend_limit = is_over_spend_limit(
+            redis_client,
+            daily_limit=settings.daily_token_limit,
+            monthly_limit=settings.monthly_token_limit,
+        )
+    return CAPACITY_REPLY if over_spend_limit else None
+
+
 def _run_chat_turn(
     graph: CompiledStateGraph,
     redis_client: Redis,
@@ -303,19 +358,12 @@ def _run_chat_turn(
     config: RunnableConfig = {"configurable": {"thread_id": session_id}}
 
     try:
-        snapshot = graph.get_state(config)
-        history = (snapshot.values or {}).get("history", [])
-        if len(history) >= settings.max_conversation_turns:
-            return CONVERSATION_LIMIT_REPLY, []
+        fixed_reply = _precheck_reply(graph, redis_client, config)
+        if fixed_reply is not None:
+            return fixed_reply, []
 
-        if is_over_spend_limit(
-            redis_client,
-            daily_limit=settings.daily_token_limit,
-            monthly_limit=settings.monthly_token_limit,
-        ):
-            return CAPACITY_REPLY, []
-
-        final_state = graph.invoke({"question": message}, config=config)
+        with timed("graph"):
+            final_state = graph.invoke({"question": message}, config=config)
     except AllKeysRateLimitedError:
         # Every Groq pool key is at its own local RPM/RPD budget -- nothing was actually sent
         # to Groq for this turn. CAPACITY_REPLY (Section D's spend-cap message) fits this
@@ -327,7 +375,8 @@ def _run_chat_turn(
         logger.exception("Outbound service failure during a /chat turn")
         return OUTBOUND_ERROR_REPLY, []
 
-    record_token_usage(redis_client, final_state["usage"]["total_tokens"])
+    with timed("cost_record"):
+        record_token_usage(redis_client, final_state["usage"]["total_tokens"])
     answer = final_state["answer"]
     cited_slugs = final_state.get("cited_slugs", [])
     return answer, cited_items_from_ranked(final_state["search_result"]["ranked"], cited_slugs)
@@ -345,14 +394,23 @@ async def chat(
         raise HTTPException(status_code=503, detail="Chat is temporarily disabled.")
     if not await _try_acquire_chat_slot():
         raise HTTPException(status_code=503, detail="Server busy, please try again shortly.")
-    try:
-        answer, cited = await run_in_threadpool(
-            _run_chat_turn, graph, redis_client, payload.session_id, payload.message
-        )
-    finally:
-        await _release_chat_slot()
+    with track_timings() as timings:
+        try:
+            with timed("turn"):
+                answer, cited = await run_in_threadpool(
+                    _run_chat_turn, graph, redis_client, payload.session_id, payload.message
+                )
+        finally:
+            await _release_chat_slot()
+    _log_turn_timings(timings)
+    return _build_chat_response(payload.session_id, answer, cited)
+
+
+def _build_chat_response(
+    session_id: str, answer: str, cited: list[GeneratedCitedItem]
+) -> ChatResponse:
     return ChatResponse(
-        session_id=payload.session_id,
+        session_id=session_id,
         answer=answer,
         cited_items=[
             CitedItem(
@@ -366,6 +424,133 @@ async def chat(
             )
             for item in cited
         ],
+    )
+
+
+def _sse(event: str, data: Any) -> str:
+    """One Server-Sent Event. json.dumps keeps `data` on a single line (newlines in the text
+    are escaped), which is all the SSE framing needs."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _stream_chat_turn(
+    graph: CompiledStateGraph,
+    redis_client: Redis,
+    session_id: str,
+    message: str,
+) -> Iterator[tuple[str, Any]]:
+    """The blocking body of a /chat/stream turn, as a generator of ("delta", text) events
+    followed by exactly one ("done", (answer, cited_items)).
+
+    Same guards and the same degrade-to-a-fallback-reply handling as _run_chat_turn() -- a
+    failure before or during the stream still ends in a "done" carrying the fallback text, which
+    replaces whatever partial text the guest was already shown. Only a genuine bug escapes, to be
+    reported by the caller as an "error" event.
+    """
+    config: RunnableConfig = {"configurable": {"thread_id": session_id}}
+    final_state: dict[str, Any] | None = None
+
+    try:
+        fixed_reply = _precheck_reply(graph, redis_client, config)
+        if fixed_reply is not None:
+            yield "done", (fixed_reply, [])
+            return
+
+        with timed("graph"):
+            for item in graph.stream(
+                {"question": message}, config=config, stream_mode=["custom", "values"]
+            ):
+                # With a list of modes LangGraph yields (mode, chunk) pairs; its stubs only
+                # describe the single-mode (bare chunk) shape.
+                mode, chunk = cast(tuple[str, Any], item)
+                if mode == "custom":
+                    yield "delta", chunk["delta"]
+                else:
+                    final_state = chunk
+    except AllKeysRateLimitedError:
+        logger.warning("All Groq pool keys at local rate limit -- turn skipped, no LLM call made")
+        yield "done", (CAPACITY_REPLY, [])
+        return
+    except TRANSIENT_OUTBOUND_ERRORS:
+        logger.exception("Outbound service failure during a /chat/stream turn")
+        yield "done", (OUTBOUND_ERROR_REPLY, [])
+        return
+
+    assert final_state is not None, "graph.stream() ended without a final state"
+    with timed("cost_record"):
+        record_token_usage(redis_client, final_state["usage"]["total_tokens"])
+    cited = cited_items_from_ranked(
+        final_state["search_result"]["ranked"], final_state.get("cited_slugs", [])
+    )
+    yield "done", (final_state["answer"], cited)
+
+
+async def _sse_events(
+    graph: CompiledStateGraph, redis_client: Redis, payload: ChatRequest
+) -> AsyncIterator[str]:
+    """Drive _stream_chat_turn() on the threadpool and encode its events for the wire.
+
+    `first_delta` (ms from the request reaching this handler to the first visible text) is the
+    latency a guest actually feels, and is logged alongside the per-stage timings.
+    """
+    started = time.perf_counter()
+    with track_timings() as timings:
+        try:
+            async for event, data in iterate_in_threadpool(
+                _stream_chat_turn(graph, redis_client, payload.session_id, payload.message)
+            ):
+                if event == "delta":
+                    timings.setdefault("first_delta", (time.perf_counter() - started) * 1000)
+                    yield _sse("delta", {"text": data})
+                else:
+                    answer, cited = data
+                    response = _build_chat_response(payload.session_id, answer, cited)
+                    yield _sse("done", response.model_dump())
+        except Exception:
+            # Headers (HTTP 200) are long gone by now, so the generic-500 handler can't run:
+            # report the same generic message as an event instead.
+            logger.exception("Unhandled exception on POST /chat/stream")
+            yield _sse("error", {"error": INTERNAL_ERROR_MESSAGE})
+        timings["turn"] = (time.perf_counter() - started) * 1000
+    _log_turn_timings(timings)
+
+
+class _ChatSlotResponse(StreamingResponse):
+    """A StreamingResponse that gives its /chat concurrency slot back when it's finished.
+
+    Done here, not in the body generator's `finally`: Starlette only ever runs a response's
+    __call__, so this fires on a normal finish, a client disconnect and an error alike -- even
+    if the generator was never started, which a `finally` inside it can't cover.
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await _release_chat_slot()
+
+
+@app.post("/chat/stream")
+@limiter.limit(CHAT_RATE_LIMIT)
+async def chat_stream(
+    request: Request,
+    payload: ChatRequest,
+    graph: CompiledStateGraph = Depends(get_graph),
+    redis_client: Redis = Depends(get_redis_client),
+) -> StreamingResponse:
+    """Server-Sent Events version of /chat: `delta` events carrying the answer text as it is
+    generated, then one `done` event with the same JSON body /chat returns (its `answer` is
+    authoritative -- clients should replace the streamed text with it), or an `error` event."""
+    if not settings.chat_enabled:
+        raise HTTPException(status_code=503, detail="Chat is temporarily disabled.")
+    if not await _try_acquire_chat_slot():
+        raise HTTPException(status_code=503, detail="Server busy, please try again shortly.")
+    return _ChatSlotResponse(
+        _sse_events(graph, redis_client, payload),
+        media_type="text/event-stream",
+        # no-cache/X-Accel-Buffering: a proxy that buffers the body would hold every delta back
+        # until the stream ends, defeating the point.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

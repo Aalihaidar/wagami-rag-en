@@ -1,4 +1,8 @@
 import datetime as dt
+import json
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -228,6 +232,31 @@ def test_chat_returns_answer_and_cited_items_with_overridden_graph() -> None:
         app.dependency_overrides.pop(get_redis_client, None)
 
 
+def test_chat_logs_one_per_stage_timing_line_per_turn(caplog: pytest.LogCaptureFixture) -> None:
+    fake_graph = FakeGraph(
+        {
+            "answer": "hi",
+            "cited_slugs": [],
+            "usage": {"total_tokens": 1},
+            "search_result": {"ranked": []},
+        }
+    )
+    app.dependency_overrides[get_graph] = lambda: fake_graph
+    app.dependency_overrides[get_redis_client] = lambda: FakeRedis()
+    try:
+        with caplog.at_level(logging.INFO, logger="app.main"), TestClient(app) as client:
+            response = client.post("/chat", json={"session_id": "s1", "message": "hello"})
+        assert response.status_code == 200
+        records = [r for r in caplog.records if r.getMessage() == "chat turn timings"]
+        assert len(records) == 1
+        timings = records[0].timings_ms  # type: ignore[attr-defined]
+        assert {"turn", "state_read", "cost_check", "graph", "cost_record"} <= set(timings)
+        assert all(ms >= 0 for ms in timings.values())
+    finally:
+        app.dependency_overrides.pop(get_graph, None)
+        app.dependency_overrides.pop(get_redis_client, None)
+
+
 def test_chat_returns_a_fixed_reply_once_conversation_turn_cap_is_hit() -> None:
     long_history = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(50)]
     fake_graph = FakeGraph({"answer": "unused", "usage": {"total_tokens": 0}}, history=long_history)
@@ -305,3 +334,205 @@ def test_delete_session_discards_history_with_overridden_checkpointer() -> None:
         assert fake_checkpointer.deleted_threads == ["s1"]
     finally:
         app.dependency_overrides.pop(get_checkpointer, None)
+
+
+# --- /chat/stream (Server-Sent Events) -------------------------------------------------------
+
+RANKED_ESPRESSO = {
+    "row": {
+        "uuid": "abc-123",
+        "score": 0.9,
+        "properties": {
+            "item_type": "menu_item",
+            "slug": "double-espresso",
+            "name": "Double Espresso",
+            "description": "Two shots.",
+            "ingredients": ["coffee"],
+            "price_gbp": 2.5,
+            "image": "espresso.png",
+        },
+    },
+    "rerank": 0.9,
+    "hybrid": 0.9,
+}
+
+
+class FakeStreamingGraph(FakeGraph):
+    """A graph whose stream() yields what LangGraph's stream_mode=["custom", "values"] does:
+    ("custom", {"delta": ...}) events, then the final state as a ("values", ...) pair."""
+
+    def __init__(
+        self,
+        deltas: list[str],
+        *,
+        cited_slugs: list[str] | None = None,
+        fail_after_deltas: Exception | None = None,
+        history: list[Any] | None = None,
+    ) -> None:
+        final_state = {
+            "answer": "".join(deltas),
+            "cited_slugs": cited_slugs or [],
+            "usage": {"total_tokens": 42},
+            "search_result": {"ranked": [RANKED_ESPRESSO]},
+        }
+        super().__init__(final_state, history=history)
+        self._deltas = deltas
+        self._fail_after_deltas = fail_after_deltas
+        self.stream_calls: list[dict[str, Any]] = []
+
+    def stream(
+        self, input: dict[str, Any], config: dict[str, Any], stream_mode: list[str]
+    ) -> Iterator[tuple[str, Any]]:
+        self.stream_calls.append({"input": input, "config": config, "stream_mode": stream_mode})
+        for delta in self._deltas:
+            yield "custom", {"delta": delta}
+        if self._fail_after_deltas is not None:
+            raise self._fail_after_deltas
+        yield "values", {"answer": "intermediate"}
+        yield "values", self._final_state
+
+
+@contextmanager
+def _client_with(graph: Any, redis: Any = None) -> Iterator[TestClient]:
+    app.dependency_overrides[get_graph] = lambda: graph
+    app.dependency_overrides[get_redis_client] = lambda: redis if redis is not None else FakeRedis()
+    try:
+        with TestClient(app) as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(get_graph, None)
+        app.dependency_overrides.pop(get_redis_client, None)
+
+
+def _events(body: str) -> list[tuple[str, Any]]:
+    """Parse an SSE body into (event, decoded JSON data) pairs."""
+    events = []
+    for block in body.strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in block.splitlines())
+        events.append((lines["event"], json.loads(lines["data"])))
+    return events
+
+
+def _post_stream(client: TestClient, message: str = "espresso price?") -> Any:
+    return client.post("/chat/stream", json={"session_id": "s1", "message": message})
+
+
+def test_chat_stream_sends_deltas_then_a_done_event_with_the_full_response() -> None:
+    graph = FakeStreamingGraph(
+        ["Our double ", "espresso is ", "£2.50."], cited_slugs=["double-espresso"]
+    )
+    redis = FakeRedis()
+    with _client_with(graph, redis) as client:
+        response = _post_stream(client)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache"
+    events = _events(response.text)
+    assert [name for name, _ in events] == ["delta", "delta", "delta", "done"]
+    assert [data["text"] for name, data in events if name == "delta"] == [
+        "Our double ",
+        "espresso is ",
+        "£2.50.",
+    ]
+    done = events[-1][1]
+    assert done["session_id"] == "s1"
+    assert done["answer"] == "Our double espresso is £2.50."
+    assert done["cited_items"][0]["slug"] == "double-espresso"
+    assert graph.stream_calls[0]["config"] == {"configurable": {"thread_id": "s1"}}
+    assert graph.stream_calls[0]["stream_mode"] == ["custom", "values"]
+    assert redis.store  # token usage was recorded, once the stream completed
+
+
+def test_chat_stream_is_blocked_by_the_conversation_cap_before_reaching_the_llm() -> None:
+    history = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(50)]
+    graph = FakeStreamingGraph(["never sent"], history=history)
+    with _client_with(graph) as client:
+        response = _post_stream(client)
+
+    assert _events(response.text) == [
+        ("done", {"session_id": "s1", "answer": CONVERSATION_LIMIT_REPLY, "cited_items": []})
+    ]
+    assert graph.stream_calls == []
+
+
+def test_chat_stream_is_blocked_by_the_spend_cap_before_reaching_the_llm() -> None:
+    graph = FakeStreamingGraph(["never sent"])
+    redis = FakeRedis()
+    redis.store[_daily_key(dt.datetime.now(dt.UTC))] = 10_000_000
+    with _client_with(graph, redis) as client:
+        response = _post_stream(client)
+
+    assert _events(response.text)[0][1]["answer"] == CAPACITY_REPLY
+    assert graph.stream_calls == []
+
+
+def test_chat_stream_degrades_to_the_fallback_reply_on_an_outbound_failure_mid_stream() -> None:
+    graph = FakeStreamingGraph(["Our double "], fail_after_deltas=TimeoutError("groq stalled"))
+    with _client_with(graph) as client:
+        response = _post_stream(client)
+
+    events = _events(response.text)
+    assert [name for name, _ in events] == ["delta", "done"]
+    # The done event's answer replaces the partial text the guest already saw.
+    assert events[-1][1]["answer"] == main_module.OUTBOUND_ERROR_REPLY
+    assert events[-1][1]["cited_items"] == []
+
+
+def test_chat_stream_reports_a_genuine_bug_as_an_error_event() -> None:
+    graph = FakeStreamingGraph([], fail_after_deltas=RuntimeError("real bug"))
+    with _client_with(graph) as client:
+        response = _post_stream(client)
+
+    assert response.status_code == 200  # the status line was already sent when it happened
+    assert _events(response.text) == [("error", {"error": main_module.INTERNAL_ERROR_MESSAGE})]
+
+
+def test_chat_stream_gives_its_concurrency_slot_back_after_every_outcome() -> None:
+    assert main_module._chat_slots_in_use == 0
+    outcomes = [
+        FakeStreamingGraph(["ok"]),
+        FakeStreamingGraph(["x"], fail_after_deltas=TimeoutError()),
+        FakeStreamingGraph([], fail_after_deltas=RuntimeError("bug")),
+    ]
+    for graph in outcomes:
+        with _client_with(graph) as client:
+            _post_stream(client)
+        assert main_module._chat_slots_in_use == 0
+
+
+def test_chat_stream_returns_503_when_the_kill_switch_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module.settings, "chat_enabled", False)
+    with _client_with(FakeStreamingGraph(["x"])) as client:
+        response = _post_stream(client)
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "Chat is temporarily disabled."}
+    assert main_module._chat_slots_in_use == 0
+
+
+def test_chat_stream_rejects_an_invalid_request_like_chat_does() -> None:
+    with _client_with(FakeStreamingGraph(["x"])) as client:
+        response = client.post("/chat/stream", json={"session_id": "s1", "message": ""})
+
+    assert response.status_code == 422
+
+
+def test_chat_stream_logs_time_to_first_delta_alongside_the_stage_timings(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with (
+        caplog.at_level(logging.INFO, logger="app.main"),
+        _client_with(FakeStreamingGraph(["a", "b"])) as client,
+    ):
+        _post_stream(client)
+
+    records = [r for r in caplog.records if r.getMessage() == "chat turn timings"]
+    assert len(records) == 1
+    timings = records[0].timings_ms  # type: ignore[attr-defined]
+    assert {"turn", "state_read", "cost_check", "graph", "cost_record", "first_delta"} <= set(
+        timings
+    )
+    assert timings["first_delta"] <= timings["turn"]

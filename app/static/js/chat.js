@@ -1,7 +1,8 @@
 "use strict";
 
 /* Vanilla JS chat client -- no build step, no framework (Section 2's language decision).
- * Talks only to same-origin /session and /chat; renders every message as escaped text
+ * Talks only to same-origin /session and /chat/stream (the reply arrives as Server-Sent
+ * Events, read by sse.js); renders every message as escaped text
  * (textContent, never innerHTML of anything server- or model-derived) per Section 3's
  * client-side rendering-safety requirement.
  */
@@ -100,6 +101,17 @@ function buildItemCard(item) {
   return card;
 }
 
+/** Appends the cited-item cards under a bubble's text. */
+function appendItemCards(bubble, items) {
+  if (items.length === 0) return;
+  const gallery = document.createElement("div");
+  gallery.className = "item-cards";
+  for (const item of items) {
+    gallery.appendChild(buildItemCard(item));
+  }
+  bubble.appendChild(gallery);
+}
+
 /** Appends one message bubble. `text` is always set via textContent -- never HTML. */
 function appendMessage(role, text, { items = [], scroll = true } = {}) {
   const shouldScroll = scroll && isNearBottom();
@@ -107,19 +119,20 @@ function appendMessage(role, text, { items = [], scroll = true } = {}) {
   const bubble = document.createElement("div");
   bubble.className = `message message--${role}`;
   bubble.textContent = text;
-
-  if (items.length > 0) {
-    const gallery = document.createElement("div");
-    gallery.className = "item-cards";
-    for (const item of items) {
-      gallery.appendChild(buildItemCard(item));
-    }
-    bubble.appendChild(gallery);
-  }
+  appendItemCards(bubble, items);
 
   messageLog.appendChild(bubble);
   if (shouldScroll) scrollToBottom();
   return bubble;
+}
+
+/** Replaces a bubble's whole text (the streamed reply so far, or the final answer) and keeps the
+ * view pinned to the bottom only if the guest hadn't scrolled away. Instant, not smooth: this
+ * runs on every chunk, and queued smooth scrolls would lag behind the text. */
+function setBubbleText(bubble, text) {
+  const shouldScroll = isNearBottom();
+  bubble.textContent = text;
+  if (shouldScroll) messageLog.scrollTop = messageLog.scrollHeight;
 }
 
 function showTypingIndicator() {
@@ -202,21 +215,59 @@ async function sendMessage(text) {
   setBusy(true);
 
   inFlightController = new AbortController();
+  let bubble = null;
+  let streamedText = "";
   try {
-    const response = await fetch("/chat", {
+    const response = await fetch("/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: sessionId, message: text }),
       signal: inFlightController.signal,
     });
-    const data = await response.json();
-    hideTypingIndicator();
 
     if (!response.ok) {
+      // Rejections that happen before a stream starts (rate limit, busy, kill switch,
+      // validation) are the usual JSON error body, not an event stream.
+      const data = await response.json();
+      hideTypingIndicator();
       appendMessage("error", data.error || "Something went wrong. Please try again.");
       return;
     }
-    appendMessage("assistant", data.answer, { items: data.cited_items || [] });
+
+    // Suppresses the log's screen-reader announcements until the reply is complete, so it isn't
+    // read out again on every chunk.
+    messageLog.setAttribute("aria-busy", "true");
+    let finished = false;
+    for await (const { event, data } of readSseEvents(response)) {
+      if (event === "delta") {
+        if (!bubble) {
+          hideTypingIndicator();
+          bubble = appendMessage("assistant", "");
+        }
+        streamedText += data.text;
+        setBubbleText(bubble, streamedText.trimStart());
+      } else if (event === "done") {
+        finished = true;
+        hideTypingIndicator();
+        // `answer` is authoritative: it replaces the streamed preview, which differs from it
+        // when the server swapped in a fallback reply mid-stream.
+        const items = data.cited_items || [];
+        if (bubble) {
+          setBubbleText(bubble, data.answer);
+          appendItemCards(bubble, items);
+        } else {
+          appendMessage("assistant", data.answer, { items });
+        }
+      } else if (event === "error") {
+        finished = true;
+        hideTypingIndicator();
+        appendMessage("error", data.error || "Something went wrong. Please try again.");
+      }
+    }
+    if (!finished) {
+      hideTypingIndicator();
+      appendMessage("error", "The reply was interrupted -- please try again.");
+    }
   } catch (err) {
     hideTypingIndicator();
     if (err.name === "AbortError") {
@@ -228,6 +279,7 @@ async function sendMessage(text) {
       );
     }
   } finally {
+    messageLog.removeAttribute("aria-busy");
     inFlightController = null;
     setBusy(false);
     messageInput.focus();

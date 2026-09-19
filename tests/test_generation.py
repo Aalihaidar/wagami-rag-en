@@ -1,14 +1,20 @@
+import json
+
+import pytest
+
 from app.agent.generation import (
     GENERATION_SYSTEM_PROMPT,
     SAFE_FALLBACK_REPLY,
     SCOPE_AND_SAFETY,
+    AnswerStreamDecoder,
+    LeakHoldback,
     build_context,
-    build_generation_response_schema,
     build_user_prompt,
     citable_slugs,
     cited_items_from_ranked,
     contains_system_prompt_leak,
     format_row,
+    parse_generation_reply,
     temperature_for,
     tone_for,
 )
@@ -162,13 +168,55 @@ def test_citable_slugs_only_includes_menu_items_with_an_image() -> None:
     assert slugs == ["vegan-ramen"]
 
 
-def test_build_generation_response_schema_constrains_cited_slugs_to_candidates() -> None:
-    schema = build_generation_response_schema(["vegan-ramen", "double-espresso"])
-    assert schema["properties"]["cited_slugs"]["items"]["enum"] == [
-        "vegan-ramen",
-        "double-espresso",
-    ]
-    assert set(schema["required"]) == {"answer", "cited_slugs"}
+SLUGS = ["vegan-ramen", "double-espresso"]
+
+
+def test_parse_generation_reply_reads_the_answer_and_cited_slugs() -> None:
+    text = json.dumps({"answer": "It's £2.50.", "cited_slugs": ["double-espresso"]})
+
+    assert parse_generation_reply(text, SLUGS) == ("It's £2.50.", ["double-espresso"])
+
+
+def test_parse_generation_reply_drops_slugs_that_are_not_candidates() -> None:
+    text = json.dumps({"answer": "Hi", "cited_slugs": ["double-espresso", "invented-dish", 7]})
+
+    assert parse_generation_reply(text, SLUGS) == ("Hi", ["double-espresso"])
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    ["```json\n{body}\n```", "Here you go: {body} Hope that helps!", "\n\n{body}\n"],
+)
+def test_parse_generation_reply_tolerates_text_or_fences_around_the_object(wrapper: str) -> None:
+    body = json.dumps({"answer": "Yes.", "cited_slugs": ["vegan-ramen"]})
+
+    assert parse_generation_reply(wrapper.replace("{body}", body), SLUGS) == (
+        "Yes.",
+        ["vegan-ramen"],
+    )
+
+
+def test_parse_generation_reply_treats_missing_or_mistyped_cited_slugs_as_none_cited() -> None:
+    assert parse_generation_reply('{"answer": "Hi"}', SLUGS) == ("Hi", [])
+    assert parse_generation_reply('{"answer": "Hi", "cited_slugs": "vegan-ramen"}', SLUGS) == (
+        "Hi",
+        [],
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "just prose, no object",
+        '{"answer": "cut off',
+        '{"cited_slugs": []}',
+        '{"answer": 5}',
+        "[]",
+    ],
+)
+def test_parse_generation_reply_returns_none_when_there_is_no_usable_answer(text: str) -> None:
+    assert parse_generation_reply(text, SLUGS) is None
 
 
 def test_format_row_faq() -> None:
@@ -297,3 +345,107 @@ def test_safe_fallback_reply_does_not_itself_trigger_the_leak_check() -> None:
     otherwise a second pass could loop or the fallback would look like exactly the kind of
     thing it's meant to prevent."""
     assert contains_system_prompt_leak(GENERATION_SYSTEM_PROMPT, SAFE_FALLBACK_REPLY) is False
+
+
+def _chunked(text: str, size: int) -> list[str]:
+    return [text[i : i + size] for i in range(0, len(text), size)]
+
+
+ANSWER_SAMPLES = [
+    "Our vegan ramen is \u00a39.50.",
+    'She said "hello" and left\\right.',
+    "Line one\nLine two\ttabbed / slashed",
+    "Emoji \U0001f35c and accents caf\u00e9 \u2014 done",
+    "",
+]
+
+
+@pytest.mark.parametrize("answer", ANSWER_SAMPLES)
+@pytest.mark.parametrize("ensure_ascii", [True, False])
+@pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 7, 64])
+def test_decoder_reassembles_the_answer_however_the_json_is_chunked(
+    answer: str, ensure_ascii: bool, chunk_size: int
+) -> None:
+    raw = json.dumps({"answer": answer, "cited_slugs": ["a-slug"]}, ensure_ascii=ensure_ascii)
+    decoder = AnswerStreamDecoder(json_mode=True)
+
+    streamed = "".join(decoder.feed(chunk) for chunk in _chunked(raw, chunk_size))
+
+    assert streamed == answer
+    assert decoder.finished
+
+
+def test_decoder_never_emits_cited_slugs_or_anything_after_the_answer() -> None:
+    decoder = AnswerStreamDecoder(json_mode=True)
+
+    out = decoder.feed('{"answer": "Hi there", "cited_slugs": ["vegan-ramen"]}')
+
+    assert out == "Hi there"
+    assert decoder.feed("more trailing text") == ""
+
+
+def test_decoder_emits_nothing_until_the_answer_key_has_fully_arrived() -> None:
+    decoder = AnswerStreamDecoder(json_mode=True)
+
+    assert decoder.feed('{"ans') == ""
+    assert decoder.feed('wer": ') == ""
+    assert decoder.feed('"Hel') == "Hel"
+
+
+def test_decoder_holds_a_split_escape_until_its_remaining_characters_arrive() -> None:
+    decoder = AnswerStreamDecoder(json_mode=True)
+
+    assert decoder.feed('{"answer": "a\\') == "a"
+    assert decoder.feed("n") == "\n"
+    assert decoder.feed("\\ud83c") == ""  # a high surrogate alone can't be decoded yet
+    assert decoder.feed("\\udf5c!") == "\U0001f35c!"
+
+
+def test_decoder_replaces_a_malformed_lone_surrogate_instead_of_raising() -> None:
+    decoder = AnswerStreamDecoder(json_mode=True)
+
+    out = decoder.feed('{"answer": "x\\udc00y\\ud83cz"}')
+
+    assert out == "x\ufffdy\ufffdz"
+
+
+def test_decoder_passes_free_text_straight_through() -> None:
+    decoder = AnswerStreamDecoder(json_mode=False)
+
+    assert decoder.feed("Plain ") + decoder.feed("text") == "Plain text"
+
+
+def _words(count: int) -> list[str]:
+    return SCOPE_AND_SAFETY.split()[:count]
+
+
+def test_holdback_releases_all_of_an_innocent_reply_by_the_end() -> None:
+    reply = "Our vegan ramen is a rich miso broth with tofu and greens, and costs 9.50 pounds."
+    guard = LeakHoldback(SCOPE_AND_SAFETY)
+
+    released = [guard.push(piece) for piece in _chunked(reply, 4)]
+
+    assert not guard.leaked
+    assert "".join(released) + guard.flush() == reply
+    # It runs a few words behind the model rather than echoing each chunk immediately.
+    assert "".join(released) != reply
+
+
+def test_holdback_flags_a_leak_before_any_word_of_the_leaked_run_is_released() -> None:
+    prefix = "Sure, here it is:"
+    leaked_run = " ".join(_words(8))
+    guard = LeakHoldback(SCOPE_AND_SAFETY)
+    released: list[str] = []
+
+    for word in f"{prefix} {leaked_run}".split():
+        released.append(guard.push(word + " "))
+        if guard.leaked:
+            break
+
+    assert guard.leaked
+    shown = "".join(released).split()
+    # Whatever was released is only ever a leading part of the innocent prefix -- never a word
+    # of the leaked run, whose first word was still being held back when the leak was flagged.
+    assert shown == prefix.split()[: len(shown)]
+    assert guard.push("more") == ""
+    assert guard.flush() == ""
