@@ -148,6 +148,9 @@ function setComposerDisabled(disabled) {
 
 function setBusy(isBusy) {
   setComposerDisabled(isBusy);
+  // Stop takes Send's place rather than sitting beside it -- two buttons plus the input don't
+  // fit on a narrow phone, and a disabled Send is dead space while a reply is in flight anyway.
+  sendButton.hidden = isBusy;
   stopButton.hidden = !isBusy;
 }
 
