@@ -25,6 +25,12 @@
   --radius: 14px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  /* Side gutter shared by header, log and composer -- tighter on small phones. */
+  --gutter: 16px;
+  --avatar-size: 32px;
+  --avatar-offset: 40px; /* avatar + 8px gap */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -49,6 +55,15 @@
   box-sizing: border-box;
 }
 
+/* Root size scales gently with the screen (16px on phones, up to 20px on large monitors);
+   everything below is in rem/%, so type, spacing and the chat column all grow together. The
+   16px floor also keeps the message input at >=16px, which stops iOS zooming on focus. */
+html {
+  font-size: clamp(16px, 13.6px + 0.4vw, 20px);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 html,
 body {
   height: 100%;
@@ -56,6 +71,9 @@ body {
 
 body {
   margin: 0;
+  /* viewport-fit=cover lets the page draw under a landscape notch/rounded corner -- keep
+     content clear of it. */
+  padding-inline: var(--safe-left) var(--safe-right);
   background: var(--bg);
   color: var(--text);
   font-family:
@@ -66,7 +84,7 @@ body {
     Helvetica,
     Arial,
     sans-serif;
-  font-size: 16px;
+  font-size: 1rem;
   line-height: 1.5;
 }
 
@@ -85,8 +103,11 @@ body {
 .page {
   display: flex;
   flex-direction: column;
+  min-height: 100vh; /* fallback for browsers without dvh */
   min-height: 100dvh;
-  max-width: 720px;
+  /* Column width follows the root font size, so it widens on big screens instead of staying a
+     narrow strip; on anything smaller than that it simply fills the screen. */
+  max-width: 46rem;
   margin: 0 auto;
   background: var(--bg);
 }
@@ -94,7 +115,8 @@ body {
 .app-header {
   display: flex;
   align-items: center;
-  padding: calc(12px + var(--safe-top)) 16px 12px;
+  justify-content: center;
+  padding: calc(12px + var(--safe-top)) var(--gutter) 12px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
 }
@@ -103,12 +125,14 @@ body {
   font-size: 1.05rem;
   font-weight: 600;
   margin: 0;
+  text-align: center;
 }
 
 .message-log {
   flex: 1 1 auto;
+  min-width: 0;
   overflow-y: auto;
-  padding: 16px;
+  padding: var(--gutter);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -119,7 +143,9 @@ body {
   padding: 10px 14px;
   border-radius: var(--radius);
   white-space: pre-wrap;
-  word-wrap: break-word;
+  /* `anywhere` (unlike the older word-wrap/`break-word`) also lowers the bubble's min-content
+     width, so one long unbroken string can't force the bubble wider than the screen. */
+  overflow-wrap: anywhere;
   opacity: 0;
   transform: translateY(4px);
   animation: message-in 180ms ease-out forwards;
@@ -137,6 +163,30 @@ body {
   background: var(--assistant-bubble);
   border: 1px solid var(--border);
   border-bottom-left-radius: 4px;
+}
+
+/* Bot avatar beside every assistant bubble (and the typing indicator, so it doesn't pop in
+   only when the answer lands). Drawn as a pseudo-element from one image file, so it needs no
+   markup or JS and isn't read out by screen readers -- swap the look by replacing
+   static/img/bot-avatar.svg (and bump the ?v= below -- the server sends no cache headers for
+   images, so browsers keep the old picture until the URL changes). The bubble's left margin
+   reserves the avatar's column. */
+.message--assistant,
+.typing-indicator {
+  position: relative;
+  margin-left: var(--avatar-offset);
+}
+
+.message--assistant::before,
+.typing-indicator::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: calc(-1 * var(--avatar-offset));
+  width: var(--avatar-size);
+  height: var(--avatar-size);
+  border-radius: 50%;
+  background: url("../img/bot-avatar.svg?v=2") center / cover no-repeat;
 }
 
 .message--guest {
@@ -163,7 +213,8 @@ body {
 
 .item-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  /* min(100%, ...) so a single column can never be wider than the bubble it sits in. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 9.5rem), 1fr));
   gap: 10px;
   margin-top: 10px;
 }
@@ -295,7 +346,7 @@ body {
 .composer-area {
   border-top: 1px solid var(--border);
   background: var(--surface);
-  padding: 10px 16px calc(10px + var(--safe-bottom));
+  padding: 10px var(--gutter) calc(10px + var(--safe-bottom));
   position: sticky;
   bottom: 0;
 }
@@ -307,20 +358,27 @@ body {
 
 .composer__input {
   flex: 1 1 auto;
+  /* The fix for controls vanishing on phones: a text input's automatic minimum width is its
+     intrinsic ~20-character size, so without this it refused to shrink and shoved the Send
+     button past the right edge of any screen under ~375px. */
+  min-width: 0;
   padding: 10px 14px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
   font-size: 1rem;
+  text-overflow: ellipsis;
 }
 
 .composer__button {
+  flex: 0 0 auto;
   border: none;
   border-radius: 999px;
   padding: 0 18px;
   font-size: 0.95rem;
   font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -408,7 +466,7 @@ body {
 .lightbox__close {
   position: absolute;
   top: calc(12px + var(--safe-top));
-  right: 16px;
+  right: calc(16px + var(--safe-right));
   background: rgba(255, 255, 255, 0.15);
   color: #fff;
   border: none;
@@ -418,6 +476,79 @@ body {
   font-size: 1.4rem;
   line-height: 1;
   cursor: pointer;
+}
+
+/* ---- Responsive breakpoints. The base rules above are the small-phone layout; these adapt it
+   outward (phones -> tablets -> desktop) and for unusually short screens. ---- */
+
+/* Phones: tighter gutters, and item cards get the full width of the log so two fit side by side
+   instead of one oversized card inside a narrow 82% bubble. */
+@media (max-width: 600px) {
+  :root {
+    --gutter: 12px;
+  }
+
+  .message:has(> .item-cards) {
+    max-width: calc(100% - var(--avatar-offset));
+  }
+
+  .item-cards {
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr));
+  }
+}
+
+/* Very small phones (320-360px): give the input every spare pixel. */
+@media (max-width: 380px) {
+  .composer {
+    gap: 6px;
+  }
+
+  .composer__button {
+    padding: 0 14px;
+  }
+}
+
+/* Touch screens: 44px is the minimum comfortable tap target. */
+@media (pointer: coarse) {
+  .composer__button--new-chat {
+    width: 44px;
+    height: 44px;
+  }
+
+  .composer__input,
+  .composer__button--send,
+  .composer__button--stop {
+    min-height: 44px;
+  }
+}
+
+/* Desktop / large monitors: frame the chat column so it reads as an app, not a strip of page. */
+@media (min-width: 900px) {
+  .page {
+    border-inline: 1px solid var(--border);
+  }
+
+  .message {
+    max-width: 78%;
+  }
+}
+
+/* Short screens (phones in landscape): reclaim vertical space so the conversation stays
+   visible -- otherwise header + composer + privacy note can fill the whole screen. */
+@media (max-height: 480px) {
+  .app-header {
+    padding-top: calc(6px + var(--safe-top));
+    padding-bottom: 6px;
+  }
+
+  .composer-area {
+    padding-top: 6px;
+    padding-bottom: calc(6px + var(--safe-bottom));
+  }
+
+  .privacy-note {
+    display: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
