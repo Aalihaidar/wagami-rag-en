@@ -60,7 +60,7 @@ WORKDIR /app
 # present, `import app.main` still resolves to the site-packages copy).
 COPY --from=builder --chown=app:app /opt/venv /opt/venv
 
-# data/images is gitignored (Section "Data provenance", CLAUDE.md) and never
+# data/images is gitignored and never
 # part of the build context — app/main.py's static mount already tolerates
 # the directory being absent (check_dir=False).
 

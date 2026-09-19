@@ -5,7 +5,13 @@ from unittest.mock import patch
 
 import pytest
 
-from app.agent.llm import GroqClient, load_groq_key_pool
+from app.agent.llm import (
+    GROQ_RPM_LIMIT,
+    AllKeysRateLimitedError,
+    GroqClient,
+    _KeyRateLimiter,
+    load_groq_key_pool,
+)
 
 
 class FakeResponse:
@@ -46,10 +52,10 @@ def _success(text: str = "hello") -> FakeResponse:
 
 @pytest.fixture(autouse=True)
 def _clear_ambient_key_pool(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This dev machine's own .env carries a real 21-key rotation pool (CLAUDE.md's
-    Environment & tooling section) -- without this, load_groq_key_pool() picks up real
-    ambient keys instead of the ones each test sets, the same "unconfigured isn't actually
-    true on every machine" gotcha test_chat_endpoint.py's _unconfigured_settings hit first."""
+    """This dev machine's own .env carries a real 21-key rotation pool -- without this,
+    load_groq_key_pool() picks up real ambient keys instead of the ones each test sets, the
+    same "unconfigured isn't actually true on every machine" gotcha test_chat_endpoint.py's
+    _unconfigured_settings hit first."""
     for i in range(1, 22):
         monkeypatch.delenv(f"GROQ_API_KEY_{i}", raising=False)
 
@@ -132,3 +138,77 @@ def test_pool_of_one_behaves_like_plain_single_key_client() -> None:
         result = client.call("system", "user", model="test-model")
 
     assert result["text"] == "solo"
+
+
+def test_single_key_raises_without_calling_when_already_at_rpm_limit() -> None:
+    client = GroqClient("only-key")
+    for _ in range(GROQ_RPM_LIMIT):
+        client._rate_limiter.record("only-key")
+
+    with (
+        patch("app.agent.llm.urllib.request.urlopen") as mock,
+        pytest.raises(AllKeysRateLimitedError),
+    ):
+        client.call("system", "user", model="test-model")
+    mock.assert_not_called()
+
+
+def test_pool_skips_a_rate_limited_key_and_calls_an_available_one() -> None:
+    client = GroqClient("key-1", key_pool=["key-1", "key-2"])
+    for _ in range(GROQ_RPM_LIMIT):
+        client._rate_limiter.record("key-1")
+
+    calls: list[str] = []
+
+    def fake_urlopen(req: object, timeout: float = 60) -> FakeResponse:
+        calls.append(req.get_header("Authorization"))  # type: ignore[attr-defined]
+        return _success("from key-2")
+
+    with patch("app.agent.llm.urllib.request.urlopen", side_effect=fake_urlopen):
+        result = client.call("system", "user", model="test-model")
+
+    assert result["text"] == "from key-2"
+    # Only one call was made at all -- key-1 was skipped locally, never sent an HTTP request.
+    assert len(calls) == 1
+
+
+def test_pool_raises_without_calling_when_every_key_is_at_its_limit() -> None:
+    client = GroqClient("key-1", key_pool=["key-1", "key-2", "key-3"])
+    for key in client._key_pool:
+        for _ in range(GROQ_RPM_LIMIT):
+            client._rate_limiter.record(key)
+
+    with (
+        patch("app.agent.llm.urllib.request.urlopen") as mock,
+        pytest.raises(AllKeysRateLimitedError),
+    ):
+        client.call("system", "user", model="test-model")
+    mock.assert_not_called()
+
+
+def test_rate_limiter_available_resets_after_the_minute_window_rolls_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limiter = _KeyRateLimiter(rpm_limit=GROQ_RPM_LIMIT, rpd_limit=1_000_000)
+    fake_now = [0.0]
+    monkeypatch.setattr("app.agent.llm.time.monotonic", lambda: fake_now[0])
+    monkeypatch.setattr("app.agent.llm.time.time", lambda: fake_now[0])
+
+    for _ in range(GROQ_RPM_LIMIT):
+        limiter.record("k")
+    assert limiter.available("k") is False
+
+    fake_now[0] += 61  # past the 60s window boundary
+    assert limiter.available("k") is True
+
+
+def test_rate_limiter_enforces_rpd_independently_of_rpm(monkeypatch: pytest.MonkeyPatch) -> None:
+    limiter = _KeyRateLimiter(rpm_limit=1_000_000, rpd_limit=2)
+    fake_now = [0.0]
+    monkeypatch.setattr("app.agent.llm.time.monotonic", lambda: fake_now[0])
+    monkeypatch.setattr("app.agent.llm.time.time", lambda: fake_now[0])
+
+    limiter.record("k")
+    fake_now[0] += 90  # a new minute window, same day -- RPD should still accumulate
+    limiter.record("k")
+    assert limiter.available("k") is False  # hit the RPD cap even though RPM reset

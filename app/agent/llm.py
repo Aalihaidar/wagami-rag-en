@@ -24,6 +24,13 @@ MAX_DELAY_S = 20.0
 # header rather than trusting a provider docs page, which can read lower/stale for your tier.
 LLM_MAX_RPM = 1000.0
 
+# Groq free-tier limits, confirmed 2026-09-18 -- a *local, proactive* guard, separate from
+# LLM_MAX_RPM's reactive pacing above. GroqClient tracks each pool key's own request count in
+# fixed windows and skips a key already at its confirmed limit rather than spending a real
+# request just to find out via a 429. Edit if your tier differs.
+GROQ_RPM_LIMIT = 30
+GROQ_RPD_LIMIT = 1000
+
 # Cloudflare (in front of api.groq.com) 403s Python's default "Python-urllib/x.y" User-Agent
 # with body "error code: 1010" -- easy to mistake for an auth failure. A normal-looking
 # User-Agent avoids it.
@@ -52,10 +59,10 @@ def zero_usage() -> Usage:
 def load_groq_key_pool(base_key: str) -> list[str]:
     """base_key plus any GROQ_API_KEY_1..GROQ_API_KEY_21 set in the environment, in order.
 
-    Same pool/convention the notebooks already use (see CLAUDE.md's Environment & tooling
-    section) -- read directly from os.environ rather than app/config.py's Settings, since
-    these are a variable-length, deliberately-undocumented-in-.env.example personal-account
-    pool, not a fixed set of fields worth modeling on Settings.
+    Same pool/convention the notebooks already use -- read directly from os.environ rather
+    than app/config.py's Settings, since these are a variable-length,
+    deliberately-undocumented-in-.env.example personal-account pool, not a fixed set of
+    fields worth modeling on Settings.
     """
     pool = [base_key.strip()] if base_key.strip() else []
     for i in range(1, 22):
@@ -63,6 +70,56 @@ def load_groq_key_pool(base_key: str) -> list[str]:
         if key:
             pool.append(key)
     return pool
+
+
+class AllKeysRateLimitedError(Exception):
+    """Every key in the pool is at its local RPM/RPD limit -- call() raises this *without*
+    making any HTTP request, rather than sending a call the provider would just reject."""
+
+
+class _KeyRateLimiter:
+    """Per-key fixed-window request counter (RPM + RPD), shared across the whole pool.
+
+    Fixed windows, not a rolling one -- simpler, and "approximately N requests per
+    minute/day" is the actual goal (a client-side safety margin, not exact provider-side
+    parity). The minute window uses time.monotonic() (immune to system clock changes); the
+    day window uses time.time() since "day" is inherently calendar-relative. Both are process-
+    local: with more than one worker process, each has its own view of a key's usage, so the
+    real limit is enforced approximately, not exactly -- acceptable for a proactive guard
+    backed by the provider's own reactive 429 as the real backstop (see call()'s docstring).
+    """
+
+    def __init__(self, rpm_limit: int, rpd_limit: int) -> None:
+        self.rpm_limit = rpm_limit
+        self.rpd_limit = rpd_limit
+        self._lock = threading.Lock()
+        self._minute_window: dict[str, int] = {}
+        self._minute_count: dict[str, int] = {}
+        self._day_window: dict[str, int] = {}
+        self._day_count: dict[str, int] = {}
+
+    def available(self, key: str) -> bool:
+        with self._lock:
+            minute = int(time.monotonic() // 60)
+            day = int(time.time() // 86400)
+            in_minute = self._minute_window.get(key) == minute
+            in_day = self._day_window.get(key) == day
+            minute_count = self._minute_count.get(key, 0) if in_minute else 0
+            day_count = self._day_count.get(key, 0) if in_day else 0
+            return minute_count < self.rpm_limit and day_count < self.rpd_limit
+
+    def record(self, key: str) -> None:
+        with self._lock:
+            minute = int(time.monotonic() // 60)
+            day = int(time.time() // 86400)
+            if self._minute_window.get(key) != minute:
+                self._minute_window[key] = minute
+                self._minute_count[key] = 0
+            self._minute_count[key] += 1
+            if self._day_window.get(key) != day:
+                self._day_window[key] = day
+                self._day_count[key] = 0
+            self._day_count[key] += 1
 
 
 def _http_error_detail(e: urllib.error.HTTPError) -> str:
@@ -100,6 +157,7 @@ class GroqClient:
         self._pool_index = 0
         self._pool_lock = threading.Lock()
         self._last_call_at = 0.0
+        self._rate_limiter = _KeyRateLimiter(GROQ_RPM_LIMIT, GROQ_RPD_LIMIT)
 
     def _pace(self) -> None:
         wait = (60.0 / LLM_MAX_RPM) - (time.monotonic() - self._last_call_at)
@@ -124,21 +182,36 @@ class GroqClient:
         reasoning_effort ("low"/"medium"/"high", gpt-oss models only) to control how many
         reasoning tokens the model spends before answering.
 
+        Before ever calling out, each candidate key is checked against its own local RPM/RPD
+        budget (GROQ_RPM_LIMIT/GROQ_RPD_LIMIT) -- a key already at its limit is skipped with no
+        HTTP request made, not tried and left to 429. If every pool key is at its limit,
+        raises AllKeysRateLimitedError without sending anything (see that class's docstring).
+        This is a proactive local guard on top of, not instead of, the provider's own reactive
+        429 -- the local counters are an approximation (see _KeyRateLimiter), so a genuine 429
+        from a key this method thought was available is still handled the normal way below.
+
         With more than one pool key, tries each once (a single fast attempt, no backoff)
         before falling to the next -- honoring a failing key's full retry/backoff first would
         make rotation too slow to be worth it (same reasoning as the notebooks' own
-        `_call_llm_with_rotation`). Once every key has failed once, falls through to one
-        full-retry/backoff call in case the failure was transient rather than the whole pool
-        being genuinely exhausted. Unlike the notebooks (single-threaded, a shared global
-        "current key"), the key used per attempt is kept local to this call rather than
-        mutating shared state beyond the rotation pointer itself -- this class is shared
-        across concurrent request-handling threads (FastAPI's threadpool), so a "currently
-        active key" attribute would race.
+        `_call_llm_with_rotation`). Once every key has failed once or is rate-limited, falls
+        through to one full-retry/backoff call on whichever key still has budget, in case the
+        failure was transient rather than the whole pool being genuinely exhausted. Unlike the
+        notebooks (single-threaded, a shared global "current key"), the key used per attempt is
+        kept local to this call rather than mutating shared state beyond the rotation pointer
+        itself -- this class is shared across concurrent request-handling threads (FastAPI's
+        threadpool), so a "currently active key" attribute would race.
         """
         total_keys = len(self._key_pool)
         if total_keys <= 1:
+            key = self._key_pool[0]
+            if not self._rate_limiter.available(key):
+                raise AllKeysRateLimitedError(
+                    f"The only configured key is at its local rate limit "
+                    f"({GROQ_RPM_LIMIT} RPM / {GROQ_RPD_LIMIT} RPD) -- not sending this request."
+                )
+            self._rate_limiter.record(key)
             return self._call_single_key(
-                self._key_pool[0],
+                key,
                 system_prompt,
                 user_prompt,
                 model=model,
@@ -151,9 +224,20 @@ class GroqClient:
         for attempt in range(total_keys):
             with self._pool_lock:
                 idx = self._pool_index
+            key = self._key_pool[idx]
+            if not self._rate_limiter.available(key):
+                with self._pool_lock:
+                    if self._pool_index == idx:
+                        self._pool_index = (idx + 1) % total_keys
+                print(
+                    f"   [Groq key #{idx + 1}/{total_keys} at its local rate limit -- "
+                    "skipping, no call made]"
+                )
+                continue
+            self._rate_limiter.record(key)
             try:
                 return self._call_single_key(
-                    self._key_pool[idx],
+                    key,
                     system_prompt,
                     user_prompt,
                     model=model,
@@ -174,9 +258,24 @@ class GroqClient:
 
         with self._pool_lock:
             idx = self._pool_index
-        print("   [every pool key failed once -- falling back to full retry/backoff]")
+        candidate_key = self._key_pool[idx]
+        fallback_key = (
+            candidate_key
+            if self._rate_limiter.available(candidate_key)
+            else next((k for k in self._key_pool if self._rate_limiter.available(k)), None)
+        )
+        if fallback_key is None:
+            raise AllKeysRateLimitedError(
+                f"All {total_keys} pool keys are at their local rate limit "
+                f"({GROQ_RPM_LIMIT} RPM / {GROQ_RPD_LIMIT} RPD) -- not sending this request."
+            )
+        self._rate_limiter.record(fallback_key)
+        print(
+            "   [every pool key failed once or was rate-limited -- falling back to full "
+            "retry/backoff]"
+        )
         return self._call_single_key(
-            self._key_pool[idx],
+            fallback_key,
             system_prompt,
             user_prompt,
             model=model,

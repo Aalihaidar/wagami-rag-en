@@ -24,7 +24,7 @@ from app.agent.checkpointer import build_checkpointer
 from app.agent.generation import CitedItem as GeneratedCitedItem
 from app.agent.generation import cited_items_from_ranked
 from app.agent.graph import build_graph
-from app.agent.llm import GroqClient, load_groq_key_pool
+from app.agent.llm import AllKeysRateLimitedError, GroqClient, load_groq_key_pool
 from app.agent.understanding import load_category_index
 from app.config import get_settings
 from app.cost_control import (
@@ -316,6 +316,13 @@ def _run_chat_turn(
             return CAPACITY_REPLY, []
 
         final_state = graph.invoke({"question": message}, config=config)
+    except AllKeysRateLimitedError:
+        # Every Groq pool key is at its own local RPM/RPD budget -- nothing was actually sent
+        # to Groq for this turn. CAPACITY_REPLY (Section D's spend-cap message) fits this
+        # exactly: a temporary capacity situation, not a broken/unreachable backend, so it
+        # deliberately isn't OUTBOUND_ERROR_REPLY.
+        logger.warning("All Groq pool keys at local rate limit -- turn skipped, no LLM call made")
+        return CAPACITY_REPLY, []
     except TRANSIENT_OUTBOUND_ERRORS:
         logger.exception("Outbound service failure during a /chat turn")
         return OUTBOUND_ERROR_REPLY, []
