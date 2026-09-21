@@ -3,9 +3,7 @@ import json
 import pytest
 
 from app.agent.generation import (
-    GENERATION_SYSTEM_PROMPT,
     SAFE_FALLBACK_REPLY,
-    SCOPE_AND_SAFETY,
     AnswerStreamDecoder,
     LeakHoldback,
     build_context,
@@ -18,6 +16,7 @@ from app.agent.generation import (
     temperature_for,
     tone_for,
 )
+from app.agent.prompts import GENERATION_SYSTEM_PROMPT, SCOPE_AND_SAFETY
 from app.retrieval import MenuRow, RerankHit
 
 
@@ -416,7 +415,7 @@ def test_decoder_passes_free_text_straight_through() -> None:
 
 
 def _words(count: int) -> list[str]:
-    return SCOPE_AND_SAFETY.split()[:count]
+    return list(SCOPE_AND_SAFETY.split()[:count])
 
 
 def test_holdback_releases_all_of_an_innocent_reply_by_the_end() -> None:

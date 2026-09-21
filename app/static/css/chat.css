@@ -307,37 +307,58 @@ body {
 .typing-indicator {
   align-self: flex-start;
   display: inline-flex;
-  gap: 4px;
-  padding: 12px 14px;
+  align-items: center;
+  gap: 5px;
+  padding: 14px 16px;
   border-radius: var(--radius);
   background: var(--assistant-bubble);
   border: 1px solid var(--border);
 }
 
 .typing-indicator__dot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--text-muted);
-  animation: typing-bounce 1.1s infinite ease-in-out;
+  /* A wave, not a bounce: every dot runs the same smooth, continuous up-and-down curve (no
+     resting phase), each a fraction of a cycle behind the one before it. The negative delays
+     start the wave already in motion, so all three dots are moving from the first frame instead
+     of the later ones waiting their turn. */
+  animation: typing-wave 0.9s infinite ease-in-out;
+  animation-delay: -0.24s;
 }
 
 .typing-indicator__dot:nth-child(2) {
-  animation-delay: 0.15s;
+  animation-delay: -0.12s;
 }
 
 .typing-indicator__dot:nth-child(3) {
-  animation-delay: 0.3s;
+  animation-delay: 0s;
 }
 
-@keyframes typing-bounce {
+@keyframes typing-wave {
   0%,
-  60%,
   100% {
     transform: translateY(0);
-    opacity: 0.5;
+    opacity: 0.45;
   }
-  30% {
+  50% {
+    transform: translateY(-6px);
+    opacity: 1;
+  }
+}
+
+/* The same wave, smaller, for people whose system asks for reduced motion. "Reduce" means less
+   movement, not none: a fade alone read as the dots merely changing colour, and a loading
+   indicator that does not move is not much of one. It is used only under prefers-reduced-motion
+   (see the end of this file). */
+@keyframes typing-wave-gentle {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  50% {
     transform: translateY(-4px);
     opacity: 1;
   }
@@ -558,8 +579,20 @@ body {
     transform: none;
   }
 
+  /* Smaller (4px, not 6px) and slower (1.2s, not 0.9s), with the same left-to-right stagger
+     scaled to the longer cycle. */
   .typing-indicator__dot {
-    animation: none;
+    animation-name: typing-wave-gentle;
+    animation-duration: 1.2s;
+    animation-delay: -0.32s;
+  }
+
+  .typing-indicator__dot:nth-child(2) {
+    animation-delay: -0.16s;
+  }
+
+  .typing-indicator__dot:nth-child(3) {
+    animation-delay: 0s;
   }
 
   .item-card__image {

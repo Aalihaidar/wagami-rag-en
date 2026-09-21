@@ -26,7 +26,8 @@ import sys
 
 import httpx
 
-from app.agent.generation import GENERATION_SYSTEM_PROMPT, contains_system_prompt_leak
+from app.agent.generation import contains_system_prompt_leak
+from app.agent.prompts import GENERATION_SYSTEM_PROMPT
 
 ADVERSARIAL_PROMPTS = [
     # -- Instruction override / jailbreak --

@@ -316,6 +316,17 @@ def _log_turn_timings(timings: dict[str, float]) -> None:
     )
 
 
+def _cards_for_turn(final_state: dict[str, Any]) -> list[GeneratedCitedItem]:
+    """The item cards to show with a turn's reply. A direct reply that lists a category's items
+    supplies its own; on the search route they are the retrieved dishes the answer cited; a
+    greeting, an off-topic message or a browse that lists no items has none."""
+    direct_cards = final_state.get("cited_items")
+    if direct_cards is not None:
+        return list(direct_cards)
+    ranked = final_state.get("search_result", {}).get("ranked", [])
+    return cited_items_from_ranked(ranked, final_state.get("cited_slugs", []))
+
+
 def _precheck_reply(
     graph: CompiledStateGraph, redis_client: Redis, config: RunnableConfig
 ) -> str | None:
@@ -378,8 +389,7 @@ def _run_chat_turn(
     with timed("cost_record"):
         record_token_usage(redis_client, final_state["usage"]["total_tokens"])
     answer = final_state["answer"]
-    cited_slugs = final_state.get("cited_slugs", [])
-    return answer, cited_items_from_ranked(final_state["search_result"]["ranked"], cited_slugs)
+    return answer, _cards_for_turn(final_state)
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -479,9 +489,7 @@ def _stream_chat_turn(
     assert final_state is not None, "graph.stream() ended without a final state"
     with timed("cost_record"):
         record_token_usage(redis_client, final_state["usage"]["total_tokens"])
-    cited = cited_items_from_ranked(
-        final_state["search_result"]["ranked"], final_state.get("cited_slugs", [])
-    )
+    cited = _cards_for_turn(final_state)
     yield "done", (final_state["answer"], cited)
 
 

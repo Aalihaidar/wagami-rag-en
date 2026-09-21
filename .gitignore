@@ -95,3 +95,6 @@ data/
 
 # App & deployment planning doc — kept local, not committed
 docs/APP_AND_DEPLOYMENT_PLAN.md
+
+# LLM rules spec — kept local, not committed
+docs/LLM_RULES.md

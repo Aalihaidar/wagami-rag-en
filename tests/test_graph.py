@@ -4,8 +4,10 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from app.agent.catalog import build_catalog
 from app.agent.graph import build_graph
 from app.agent.llm import LLMResponse, Usage
+from app.agent.prompts import GREETING_REPLY, OFF_TOPIC_REPLY
 from app.agent.understanding import CategoryIndex
 from app.retrieval import RetrievalTool
 from app.timing import track_timings
@@ -196,7 +198,8 @@ def test_graph_substitutes_safe_fallback_when_generation_leaks_system_prompt(
     system prompt's SCOPE_AND_SAFETY section, answer_node must swap in the safe fallback
     rather than return it -- that's the section the leak check actually scans (see graph.py's
     answer_node), not GENERATION_RULES, which deliberately instructs guest-visible content."""
-    from app.agent.generation import SAFE_FALLBACK_REPLY, SCOPE_AND_SAFETY
+    from app.agent.generation import SAFE_FALLBACK_REPLY
+    from app.agent.prompts import SCOPE_AND_SAFETY
 
     kb = FakeKB([make_obj("vegan ramen")])
     tool = RetrievalTool(kb=kb, cohere_api_key="")  # type: ignore[arg-type]
@@ -448,7 +451,8 @@ def test_graph_streams_only_the_answer_field_of_the_structured_reply(monkeypatch
 def test_graph_stops_streaming_and_swaps_in_the_fallback_when_a_leak_starts(
     monkeypatch: Any,
 ) -> None:
-    from app.agent.generation import SAFE_FALLBACK_REPLY, SCOPE_AND_SAFETY
+    from app.agent.generation import SAFE_FALLBACK_REPLY
+    from app.agent.prompts import SCOPE_AND_SAFETY
 
     leaked_words = SCOPE_AND_SAFETY.split()[:40]
     reply = "Sure, here it is: " + " ".join(leaked_words)
@@ -528,3 +532,259 @@ def test_graph_ignores_cited_slugs_the_model_invented(monkeypatch: Any) -> None:
     _, final = _run_streaming(graph)
 
     assert final["cited_slugs"] == ["double-espresso"]
+
+
+# ---- routing: greeting, off-topic and menu browsing are answered without a search -------------
+
+
+def make_browse_index() -> CategoryIndex:
+    def row(name: str, path: list[str]) -> dict[str, Any]:
+        return {"item_type": "menu_item", "name": name, "category": path[-1], "category_path": path}
+
+    catalog = build_catalog(
+        [
+            row("Lychee Sangria", ["drinks", "cocktails"]),
+            row("Flat White", ["drinks", "coffee + tea"]),
+            row("Gyoza", ["sides", "gyoza"]),
+        ]
+    )
+    return CategoryIndex(
+        categories=catalog.categories, siblings={}, alcoholic_only=set(), catalog=catalog
+    )
+
+
+class ExplodingKB:
+    """A knowledge base that fails the test if anything queries it."""
+
+    @property
+    def query(self) -> Any:
+        raise AssertionError("retrieval must not run on this route")
+
+
+def understanding_for(**overrides: Any) -> str:
+    base: dict[str, Any] = {
+        "intent": "menu",
+        "browse_group": "none",
+        "browse_category": "none",
+        "dietary": "none",
+        "price_max_gbp": None,
+        "allergens_exclude": [],
+        "search_query": "x",
+        "category_hint": [],
+        "gluten_free_only": False,
+        "kcal_max": None,
+        "protein_min_g": None,
+        "alcohol_free": False,
+    }
+    return json.dumps({**base, **overrides})
+
+
+def direct_route_graph(understanding_json: str, **kwargs: Any) -> tuple[Any, FakeGroqClient]:
+    """A graph whose retrieval would blow up if touched, and whose generation call would fail
+    the run if made -- so a passing test proves the route needs neither."""
+    tool = RetrievalTool(kb=ExplodingKB(), cohere_api_key="")  # type: ignore[arg-type]
+    client = FakeGroqClient(understanding_json, "GENERATION MUST NOT BE CALLED")
+    graph = build_graph(
+        retrieval_tool=tool,
+        category_index=make_browse_index(),
+        groq_client=client,  # type: ignore[arg-type]
+        understand_model="m",
+        generation_model="m",
+        **kwargs,
+    )
+    return graph, client
+
+
+def test_a_greeting_gets_the_fixed_greeting_with_one_llm_call_and_no_search() -> None:
+    graph, client = direct_route_graph(understanding_for(intent="greeting"))
+
+    final = graph.invoke({"question": "hello there"})
+
+    assert final["answer"] == GREETING_REPLY
+    assert len(client.calls) == 1  # only the understanding call
+    assert "search_result" not in final
+    assert final["cited_slugs"] == []
+    assert final["usage"]["generate"]["total_tokens"] == 0
+    assert final["usage"]["total_tokens"] == 15
+
+
+def test_an_off_topic_message_gets_the_fixed_redirect() -> None:
+    graph, client = direct_route_graph(understanding_for(intent="off_topic"))
+
+    final = graph.invoke({"question": "how do I change a car tyre"})
+
+    assert final["answer"] == OFF_TOPIC_REPLY
+    assert len(client.calls) == 1
+
+
+def test_a_general_menu_question_lists_the_groups() -> None:
+    graph, client = direct_route_graph(understanding_for(intent="menu_browse"))
+
+    final = graph.invoke({"question": "what is your menu?"})
+
+    assert "- drinks\n- sides" in final["answer"]
+    assert final["answer"].endswith("What kind of these would you like to see?")
+    assert len(client.calls) == 1
+
+
+def test_choosing_a_group_lists_its_categories_and_choosing_a_category_lists_its_items() -> None:
+    graph, _ = direct_route_graph(understanding_for(intent="menu_browse", browse_group="drinks"))
+    assert "- cocktails\n- coffee + tea" in graph.invoke({"question": "drinks"})["answer"]
+
+    graph, _ = direct_route_graph(
+        understanding_for(intent="menu_browse", browse_category="cocktails")
+    )
+    assert "- Lychee Sangria" in graph.invoke({"question": "cocktails"})["answer"]
+
+
+def test_a_direct_reply_is_still_delivered_as_a_stream_delta() -> None:
+    graph, _ = direct_route_graph(understanding_for(intent="greeting"))
+
+    events = list(graph.stream({"question": "hi"}, stream_mode=["custom", "values"]))
+
+    deltas = [chunk["delta"] for mode, chunk in events if mode == "custom"]
+    assert deltas == [GREETING_REPLY]
+
+
+def test_a_browse_that_states_an_allergy_goes_through_retrieval_not_a_listing(
+    monkeypatch: Any,
+) -> None:
+    """The model calls this a browse, but the guest stated an allergy. A listing would ignore
+    it; the parser must send the message down the search path, where the allergen exclusion is
+    enforced in code."""
+    kb = FakeKB([make_obj("vegan ramen")])
+    tool = RetrievalTool(kb=kb, cohere_api_key="")  # type: ignore[arg-type]
+    monkeypatch.setattr(tool, "rerank", _no_rerank)
+    client = FakeGroqClient(
+        understanding_for(
+            intent="menu_browse",
+            browse_group="drinks",
+            allergens_exclude=["milk"],
+            search_query="drinks",
+        ),
+        "A milk-free option.",
+    )
+    graph = build_graph(
+        retrieval_tool=tool,
+        category_index=make_browse_index(),
+        groq_client=client,  # type: ignore[arg-type]
+        understand_model="m",
+        generation_model="m",
+    )
+
+    final = graph.invoke({"question": "I'm allergic to milk, show me the drinks"})
+
+    assert final["understanding"]["intent"] == "menu"
+    assert final["understanding"]["allergens_exclude"] == ["milk"]
+    assert final["search_result"]["excluded"] == ["milk"]
+    assert final["answer"] == "A milk-free option."
+    assert len(client.calls) == 2  # understand + generate: the normal path
+
+
+def test_a_browse_reply_is_remembered_so_the_next_turn_can_choose_from_it() -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    with InMemorySaver() as checkpointer:
+        graph, client = direct_route_graph(
+            understanding_for(intent="menu_browse"), checkpointer=checkpointer
+        )
+        config: RunnableConfig = {"configurable": {"thread_id": "s1"}}
+        first = graph.invoke({"question": "what is your menu?"}, config=config)
+        graph.invoke({"question": "the first one"}, config=config)
+
+    second_understanding_input = client.calls[1]["user_prompt"]
+    assert "Recent conversation so far" in second_understanding_input
+    assert first["answer"] in second_understanding_input  # the list the guest is choosing from
+    assert "Guest's new message: the first one" in second_understanding_input
+
+
+def test_a_dish_question_the_model_calls_off_topic_is_searched_not_turned_away(
+    monkeypatch: Any,
+) -> None:
+    """End to end: the model returns off_topic for a message that names a real dish; the guest
+    must get a searched, generated answer rather than the fixed decline."""
+    kb = FakeKB([make_obj("lychee sangria")])
+    tool = RetrievalTool(kb=kb, cohere_api_key="")  # type: ignore[arg-type]
+    monkeypatch.setattr(tool, "rerank", _no_rerank)
+    client = FakeGroqClient(
+        understanding_for(intent="off_topic", search_query="lychee sangria"),
+        "The lychee sangria is £9.50.",
+    )
+    graph = build_graph(
+        retrieval_tool=tool,
+        category_index=make_browse_index(),
+        groq_client=client,  # type: ignore[arg-type]
+        understand_model="m",
+        generation_model="m",
+    )
+
+    final = graph.invoke({"question": "tell me about the lychee sangria"})
+
+    assert final["understanding"]["intent"] == "menu"
+    assert final["answer"] == "The lychee sangria is £9.50."
+    assert final["answer"] != OFF_TOPIC_REPLY
+    assert len(client.calls) == 2  # understand + generate: the normal path
+
+
+def make_carded_index() -> CategoryIndex:
+    rows = [
+        {
+            "id": "id-1",
+            "slug": "lychee-sangria",
+            "item_type": "menu_item",
+            "name": "Lychee Sangria",
+            "category": "cocktails",
+            "category_path": ["drinks", "cocktails"],
+            "description": "fruity",
+            "ingredients": ["lychee"],
+            "price_gbp": 8.0,
+            "image": "lychee.png",
+        },
+        {
+            "id": "id-2",
+            "slug": "flat-white",
+            "item_type": "menu_item",
+            "name": "Flat White",
+            "category": "coffee + tea",
+            "category_path": ["drinks", "coffee + tea"],
+        },
+    ]
+    catalog = build_catalog(rows)
+    return CategoryIndex(
+        categories=catalog.categories, siblings={}, alcoholic_only=set(), catalog=catalog
+    )
+
+
+def test_listing_a_categorys_items_puts_their_cards_in_the_state() -> None:
+    client = FakeGroqClient(
+        understanding_for(intent="menu_browse", browse_category="cocktails"), "NOT CALLED"
+    )
+    graph = build_graph(
+        retrieval_tool=RetrievalTool(kb=ExplodingKB(), cohere_api_key=""),  # type: ignore[arg-type]
+        category_index=make_carded_index(),
+        groq_client=client,  # type: ignore[arg-type]
+        understand_model="m",
+        generation_model="m",
+    )
+
+    final = graph.invoke({"question": "cocktails"})
+
+    assert "- Lychee Sangria: fruity; ingredients: lychee; price: £8.00." in final["answer"]
+    assert final["cited_items"] == [
+        {
+            "id": "id-1",
+            "slug": "lychee-sangria",
+            "name": "Lychee Sangria",
+            "description": "fruity",
+            "ingredients": ["lychee"],
+            "price_gbp": 8.0,
+            "image": "lychee.png",
+        }
+    ]
+    assert len(client.calls) == 1  # still only the understanding call
+
+
+def test_a_list_of_groups_carries_no_cards() -> None:
+    graph, _ = direct_route_graph(understanding_for(intent="menu_browse"))
+
+    assert graph.invoke({"question": "what is your menu?"})["cited_items"] == []

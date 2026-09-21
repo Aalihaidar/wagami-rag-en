@@ -536,3 +536,76 @@ def test_chat_stream_logs_time_to_first_delta_alongside_the_stage_timings(
         timings
     )
     assert timings["first_delta"] <= timings["turn"]
+
+
+# --- a turn answered without a search (greeting, off-topic, menu browsing) -----------------------
+
+
+def test_chat_handles_a_turn_with_no_search_result() -> None:
+    """A direct-reply turn never runs retrieval, so its final state has no `search_result`."""
+    final_state = {"answer": "Hello!", "cited_slugs": [], "usage": {"total_tokens": 15}}
+    with _client_with(FakeGraph(final_state)) as client:
+        response = client.post("/chat", json={"session_id": "s1", "message": "hi"})
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Hello!"
+    assert response.json()["cited_items"] == []
+
+
+def test_chat_stream_handles_a_turn_with_no_search_result() -> None:
+    class DirectReplyGraph(FakeStreamingGraph):
+        def __init__(self) -> None:
+            super().__init__(["Hello, welcome!"])
+            self._final_state = {"answer": "Hello, welcome!", "usage": {"total_tokens": 15}}
+
+    with _client_with(DirectReplyGraph()) as client:
+        response = _post_stream(client, "hi")
+
+    events = _events(response.text)
+    assert [name for name, _ in events] == ["delta", "done"]
+    assert events[-1][1]["answer"] == "Hello, welcome!"
+    assert events[-1][1]["cited_items"] == []
+
+
+LISTED_CARD = {
+    "id": "id-1",
+    "slug": "lychee-sangria",
+    "name": "Lychee Sangria",
+    "description": "fruity",
+    "ingredients": ["lychee"],
+    "price_gbp": 8.0,
+    "image": "lychee.png",
+}
+
+
+def test_chat_returns_the_cards_a_direct_reply_supplies_itself() -> None:
+    """A listing of a category's items brings its own cards, with no search_result behind them."""
+    final_state = {
+        "answer": "Here is everything in cocktails (drinks):\n- Lychee Sangria: fruity.",
+        "cited_slugs": [],
+        "cited_items": [LISTED_CARD],
+        "usage": {"total_tokens": 15},
+    }
+    with _client_with(FakeGraph(final_state)) as client:
+        response = client.post("/chat", json={"session_id": "s1", "message": "cocktails"})
+
+    assert response.status_code == 200
+    assert response.json()["cited_items"] == [LISTED_CARD]
+
+
+def test_chat_stream_done_event_carries_the_cards_a_direct_reply_supplies() -> None:
+    class ListingGraph(FakeStreamingGraph):
+        def __init__(self) -> None:
+            super().__init__(["Here is everything in cocktails."])
+            self._final_state = {
+                "answer": "Here is everything in cocktails.",
+                "cited_items": [LISTED_CARD],
+                "usage": {"total_tokens": 15},
+            }
+
+    with _client_with(ListingGraph()) as client:
+        response = _post_stream(client, "cocktails")
+
+    done = _events(response.text)[-1]
+    assert done[0] == "done"
+    assert done[1]["cited_items"] == [LISTED_CARD]

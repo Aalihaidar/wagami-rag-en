@@ -1,4 +1,4 @@
-"""LangGraph agent: query -> retrieve -> ground -> answer.
+"""LangGraph agent: query, then respond (no search) or retrieve -> ground -> answer.
 
 Ported from `03_evaluation_groq.ipynb`'s `answer()`/`search()` control flow, restructured
 as LangGraph nodes so app/'s FastAPI layer can invoke one compiled graph per guest turn, and
@@ -6,7 +6,7 @@ as LangGraph nodes so app/'s FastAPI layer can invoke one compiled graph per gue
 app/agent/memory.py. The multi-turn history mechanism is new, additive code, not part of the
 verified single-turn notebook pipeline; see app/agent/memory.py's own docstring.
 
-Design invariant (Section 3 of the app/deployment plan): this graph has exactly the four
+Design invariant (Section 3 of the app/deployment plan): this graph has exactly the five
 nodes below and no write-capable tools -- it cannot place orders, modify data, or call
 anything beyond read-only retrieval, so there is no "high-risk agent action" surface that
 would need human-in-the-loop approval. If a future feature ever adds a write-capable tool
@@ -15,21 +15,20 @@ would need human-in-the-loop approval. If a future feature ever adds a write-cap
 
 import logging
 import operator
-from typing import Annotated, Any, Required, TypedDict
+from typing import Annotated, Any, Literal, Required, TypedDict
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.agent.browse import DIRECT_INTENTS, direct_answer
 from app.agent.generation import (
-    CITATION_OUTPUT_INSTRUCTIONS,
     GENERATION_REASONING_EFFORT,
-    GENERATION_SYSTEM_PROMPT,
     MALFORMED_REPLY,
     SAFE_FALLBACK_REPLY,
-    SCOPE_AND_SAFETY,
     AnswerStreamDecoder,
+    CitedItem,
     LeakHoldback,
     build_context,
     build_user_prompt,
@@ -41,6 +40,11 @@ from app.agent.generation import (
 )
 from app.agent.llm import GroqClient, Usage, zero_usage
 from app.agent.memory import HistoryTurn, build_history_context
+from app.agent.prompts import (
+    CITATION_OUTPUT_INSTRUCTIONS,
+    GENERATION_SYSTEM_PROMPT,
+    SCOPE_AND_SAFETY,
+)
 from app.agent.understanding import CategoryIndex, UnderstandingResult, understand_query
 from app.retrieval import RetrievalTool, SearchResult
 from app.timing import timed
@@ -51,9 +55,10 @@ logger = logging.getLogger("app.agent.graph")
 class AgentState(TypedDict, total=False):
     """total=False since graph.invoke()'s input only ever supplies `question` -- everything
     else is populated progressively by earlier nodes. Fields read via state["key"] (rather
-    than state.get(...)) are marked Required: by the time each node runs, the graph's fixed
-    linear order (query -> retrieve -> ground -> answer) guarantees the node before it has
-    already set that key, even though the schema as a whole can't require it up front.
+    than state.get(...)) are marked Required: by the time each node runs, the graph's order
+    (query -> retrieve -> ground -> answer, or query -> respond) guarantees the node before it
+    has already set that key, even though the schema as a whole can't require it up front.
+    A turn that took the `respond` route never sets search_result, tone, prompts or slugs.
     """
 
     question: Required[str]
@@ -69,6 +74,9 @@ class AgentState(TypedDict, total=False):
     citable_slugs: Required[list[str]]
     answer: str
     cited_slugs: list[str]
+    # Item cards a direct reply supplies itself (a listing of a category's items). Absent on the
+    # search route, where the cards are chosen from `search_result` and `cited_slugs` instead.
+    cited_items: list[CitedItem]
     usage: dict[str, Any]
 
 
@@ -164,7 +172,9 @@ def build_graph(
     generation_model: str,
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledStateGraph:
-    """Compile the query -> retrieve -> ground -> answer graph.
+    """Compile the agent graph: query, then either respond (a greeting, an off-topic message,
+    or menu browsing -- answered from a fixed reply or the catalog with no search and no second
+    model call) or retrieve -> ground -> answer.
 
     groq_client=None mirrors the notebooks' own no-key fallback -- the graph still runs end
     to end (deterministic understanding, a stub answer) so retrieval/prompt logic can be
@@ -186,6 +196,29 @@ def build_graph(
                 context=history_context,
             )
         return {"understanding": understanding}
+
+    def route_after_query(state: AgentState) -> Literal["respond", "retrieve"]:
+        return "respond" if state["understanding"]["intent"] in DIRECT_INTENTS else "retrieve"
+
+    def respond_node(state: AgentState) -> dict[str, Any]:
+        understanding = state["understanding"]
+        direct = direct_answer(understanding, category_index.catalog)
+        reply = direct.text
+        # The whole reply at once: there is no generation stream to forward. The caller still
+        # gets it as a delta, so /chat/stream and /chat behave the same on every route.
+        get_stream_writer()({"delta": reply})
+        understand_usage = understanding["usage"]
+        return {
+            "answer": reply,
+            "cited_slugs": [],
+            "cited_items": direct.cards,
+            "usage": {
+                "understand": understand_usage,
+                "generate": zero_usage(),
+                "total_tokens": understand_usage["total_tokens"],
+            },
+            "history": [{"question": state["question"], "answer": reply}],
+        }
 
     def retrieve_node(state: AgentState) -> dict[str, Any]:
         search_result = retrieval_tool.search(state["understanding"])
@@ -247,11 +280,13 @@ def build_graph(
 
     graph = StateGraph(AgentState)
     graph.add_node("query", query_node)
+    graph.add_node("respond", respond_node)
     graph.add_node("retrieve", retrieve_node)
     graph.add_node("ground", ground_node)
     graph.add_node("answer", answer_node)
     graph.set_entry_point("query")
-    graph.add_edge("query", "retrieve")
+    graph.add_conditional_edges("query", route_after_query, ["respond", "retrieve"])
+    graph.add_edge("respond", END)
     graph.add_edge("retrieve", "ground")
     graph.add_edge("ground", "answer")
     graph.add_edge("answer", END)
