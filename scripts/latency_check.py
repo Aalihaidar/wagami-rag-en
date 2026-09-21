@@ -119,7 +119,7 @@ def summarise_server_log(path: str, last: int) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--base-url", default="http://localhost:8000")
     parser.add_argument("--runs", type=int, default=6, help="number of questions to send")
     parser.add_argument("--gap", type=float, default=20.0, help="seconds between turns")
