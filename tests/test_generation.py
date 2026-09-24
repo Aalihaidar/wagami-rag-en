@@ -9,10 +9,10 @@ from app.agent.generation import (
     build_context,
     build_user_prompt,
     citable_slugs,
-    cited_items_from_ranked,
     contains_system_prompt_leak,
     format_row,
     parse_generation_reply,
+    salvage_cited_slugs,
     temperature_for,
     tone_for,
 )
@@ -67,94 +67,6 @@ def test_tone_and_temperature_by_intent() -> None:
     assert tone_for("faq") != tone_for("menu")
     assert temperature_for("faq") == 0.8
     assert temperature_for("menu") == 0.2
-
-
-def test_cited_items_from_ranked_includes_description_ingredients_and_price() -> None:
-    """The card is deliberately just name/description/ingredients/price/image -- dietary
-    tags, allergens, and nutrition are real CONTEXT fields (format_row()) the model can
-    state in the answer text itself, not duplicated here (Section 4)."""
-    ramen = make_row(
-        "vegan ramen",
-        description="Rich miso broth.",
-        ingredients=["tofu", "miso", "soya"],
-        price_gbp=9.5,
-        image="r.png",
-    )
-    espresso = make_row(
-        "double espresso", description=None, ingredients=["coffee"], price_gbp=2.5, image="e.png"
-    )
-    faq = make_row("what time do you open", item_type="faq", image="")  # never cited
-    no_image = make_row("no image dish", image="")  # never cited -- nothing to show a card for
-
-    items = cited_items_from_ranked(
-        [make_hit(ramen), make_hit(espresso), make_hit(faq), make_hit(no_image)],
-        ["vegan-ramen", "double-espresso"],
-    )
-
-    assert items == [
-        {
-            "id": "uuid-vegan ramen",
-            "slug": "vegan-ramen",
-            "name": "vegan ramen",
-            "description": "Rich miso broth.",
-            "ingredients": ["tofu", "miso", "soya"],
-            "price_gbp": 9.5,
-            "image": "r.png",
-        },
-        {
-            "id": "uuid-double espresso",
-            "slug": "double-espresso",
-            "name": "double espresso",
-            "description": None,  # omitted card line, not a placeholder string
-            "ingredients": ["coffee"],
-            "price_gbp": 2.5,
-            "image": "e.png",
-        },
-    ]
-
-
-def test_cited_items_from_ranked_excludes_dishes_not_cited_by_the_model() -> None:
-    """A reply about one dish must not surface cards for every other reranked candidate --
-    the bug this filter exists to fix. Only rows the generation call's own `cited_slugs`
-    output names get a card, so a dish the model retrieved but never actually discussed is
-    excluded even though it's still one of the reranked hits."""
-    espresso = make_row(
-        "double espresso", description=None, ingredients=["coffee"], price_gbp=2.5, image="e.png"
-    )
-    latte = make_row(
-        "latte - whole milk", ingredients=["milk", "coffee"], price_gbp=2.5, image="l.png"
-    )
-
-    items = cited_items_from_ranked([make_hit(espresso), make_hit(latte)], ["double-espresso"])
-
-    assert [item["name"] for item in items] == ["double espresso"]
-
-
-def test_cited_items_from_ranked_includes_a_dish_referred_to_implicitly() -> None:
-    """`cited_slugs` is how a pronoun/implicit reference ("it", "that one") back to a dish
-    already named still gets a card -- the model resolves the reference itself and reports
-    the slug, rather than this function trying to detect it from the answer text."""
-    espresso = make_row(
-        "double espresso", description=None, ingredients=["coffee"], price_gbp=2.5, image="e.png"
-    )
-
-    items = cited_items_from_ranked(
-        [make_hit(espresso)], ["double-espresso"]
-    )  # e.g. answer: "It's £2.50." -- no literal name in the text at all
-
-    assert [item["name"] for item in items] == ["double espresso"]
-
-
-def test_cited_items_from_ranked_ignores_a_slug_not_in_ranked() -> None:
-    """Defense-in-depth: even if a malformed/hallucinated slug slipped past the json_schema
-    enum constraint, a slug that doesn't match any reranked row must never produce a card."""
-    espresso = make_row(
-        "double espresso", description=None, ingredients=["coffee"], price_gbp=2.5, image="e.png"
-    )
-
-    items = cited_items_from_ranked([make_hit(espresso)], ["not-a-real-slug"])
-
-    assert items == []
 
 
 def test_citable_slugs_only_includes_menu_items_with_an_image() -> None:
@@ -448,3 +360,59 @@ def test_holdback_flags_a_leak_before_any_word_of_the_leaked_run_is_released() -
     assert shown == prefix.split()[: len(shown)]
     assert guard.push("more") == ""
     assert guard.flush() == ""
+
+
+def test_salvage_reads_the_citation_from_a_reply_that_stopped_being_valid_json() -> None:
+    cut_off = '{"answer": "It is £2.50.", "cited_slugs": ["vegan-ramen", "invented", "vegan-ramen"'
+
+    assert salvage_cited_slugs(cut_off, SLUGS) == ["vegan-ramen"]
+
+
+def test_salvage_finds_nothing_when_no_citation_was_written() -> None:
+    assert salvage_cited_slugs('{"answer": "It is £2.50.", "cited_slu', SLUGS) == []
+    assert salvage_cited_slugs('{"answer": "Hi", "cited_slugs": [', SLUGS) == []
+    assert salvage_cited_slugs("plain prose", SLUGS) == []
+
+
+# ---- the resolved question in the generation prompt (rule P-05) ---------------------------------
+
+
+def test_the_user_prompt_is_unchanged_when_the_resolved_question_says_the_same_thing() -> None:
+    plain = build_user_prompt("how much is the ramen", "CTX", [])
+
+    assert build_user_prompt("how much is the ramen", "CTX", [], resolved_question=None) == plain
+    assert build_user_prompt("how much is the ramen", "CTX", [], resolved_question="") == plain
+    same = "How much is the ramen?"  # case and punctuation don't count as a difference
+    assert build_user_prompt("how much is the ramen", "CTX", [], resolved_question=same) == plain
+
+
+def test_a_message_that_refers_back_gets_its_resolved_meaning_inside_the_guest_message_block() -> (
+    None
+):
+    prompt = build_user_prompt(
+        "how many calories does it have?",
+        "CTX",
+        [],
+        resolved_question="How many calories does the chicken katsu curry have?",
+    )
+
+    block = prompt.split("<guest_message>\n", 1)[1].split("\n</guest_message>", 1)[0]
+    assert block == (
+        "Guest's message: how many calories does it have?\n"
+        "Read together with the earlier conversation, this means: "
+        "How many calories does the chicken katsu curry have?"
+    )
+    assert prompt.endswith("<retrieved_context>\nCTX\n</retrieved_context>")
+
+
+def test_the_resolved_question_comes_with_the_notes_unchanged() -> None:
+    prompt = build_user_prompt(
+        "is it ok?",
+        "CTX",
+        ["kcal_max"],
+        {"name": "Chicken Katsu Curry", "reason": "contains milk"},
+        resolved_question="Is the chicken katsu curry ok?",
+    )
+
+    assert "this means: Is the chicken katsu curry ok?" in prompt
+    assert prompt.count("NOTE:") == 2

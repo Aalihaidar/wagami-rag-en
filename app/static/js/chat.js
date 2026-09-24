@@ -112,13 +112,89 @@ function appendItemCards(bubble, items) {
   bubble.appendChild(gallery);
 }
 
+/** One group or category in a list of them: the picture prepared for it and its name. Not every
+ * name necessarily has a picture uploaded yet, so a missing/failed one is dropped and the card is
+ * just its name -- same "drop on error" handling as an item card's photo, and the same click-to-
+ * zoom via the lightbox. Every text field is set via textContent, as for the item cards. */
+function buildChoiceCard(card) {
+  const item = document.createElement("li");
+  item.className = "choice-card";
+
+  if (card.image) {
+    const pictureButton = document.createElement("button");
+    pictureButton.type = "button";
+    pictureButton.className = "choice-card__picture-button";
+    pictureButton.setAttribute("aria-label", `View larger image of ${card.name}`);
+
+    const img = document.createElement("img");
+    img.className = "choice-card__picture";
+    img.src = card.image;
+    img.alt = "";
+    img.loading = "lazy";
+    img.addEventListener("error", () => pictureButton.remove());
+    pictureButton.appendChild(img);
+    pictureButton.addEventListener("click", () =>
+      openLightbox(card.image, card.name, pictureButton)
+    );
+    item.appendChild(pictureButton);
+  }
+
+  const name = document.createElement("p");
+  name.className = "choice-card__name";
+  name.textContent = card.name;
+  item.appendChild(name);
+  return item;
+}
+
+/** Lays out a reply that lists groups or categories: the opening sentence, a card per name where
+ * the bullet list would be, then the closing question. Replaces whatever the bubble held. */
+function layOutChoices(bubble, choices) {
+  bubble.textContent = "";
+
+  const intro = document.createElement("div");
+  intro.className = "message__part";
+  intro.textContent = choices.intro;
+  bubble.appendChild(intro);
+
+  const list = document.createElement("ul");
+  list.className = "choice-cards";
+  for (const card of choices.cards) {
+    list.appendChild(buildChoiceCard(card));
+  }
+  bubble.appendChild(list);
+
+  const outro = document.createElement("div");
+  outro.className = "message__part";
+  outro.textContent = choices.outro;
+  bubble.appendChild(outro);
+}
+
+/** Puts a finished reply into a bubble: its text (or, for a list of groups or categories, the
+ * opening sentence, the cards and the closing question), then any item cards. `answer` is
+ * authoritative, so it replaces the streamed preview. Keeps the view pinned to the bottom only
+ * if the guest hadn't scrolled away. */
+function showReply(bubble, data) {
+  const shouldScroll = isNearBottom();
+  if (data.choices) {
+    layOutChoices(bubble, data.choices);
+  } else {
+    bubble.textContent = data.answer;
+  }
+  appendItemCards(bubble, data.cited_items || []);
+  if (shouldScroll) messageLog.scrollTop = messageLog.scrollHeight;
+}
+
 /** Appends one message bubble. `text` is always set via textContent -- never HTML. */
-function appendMessage(role, text, { items = [], scroll = true } = {}) {
+function appendMessage(role, text, { items = [], choices = null, scroll = true } = {}) {
   const shouldScroll = scroll && isNearBottom();
 
   const bubble = document.createElement("div");
   bubble.className = `message message--${role}`;
-  bubble.textContent = text;
+  if (choices) {
+    layOutChoices(bubble, choices);
+  } else {
+    bubble.textContent = text;
+  }
   appendItemCards(bubble, items);
 
   messageLog.appendChild(bubble);
@@ -251,12 +327,13 @@ async function sendMessage(text) {
         hideTypingIndicator();
         // `answer` is authoritative: it replaces the streamed preview, which differs from it
         // when the server swapped in a fallback reply mid-stream.
-        const items = data.cited_items || [];
         if (bubble) {
-          setBubbleText(bubble, data.answer);
-          appendItemCards(bubble, items);
+          showReply(bubble, data);
         } else {
-          appendMessage("assistant", data.answer, { items });
+          appendMessage("assistant", data.answer, {
+            items: data.cited_items || [],
+            choices: data.choices || null,
+          });
         }
       } else if (event === "error") {
         finished = true;

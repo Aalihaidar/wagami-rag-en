@@ -34,6 +34,7 @@ FIELDS = [
     "name",
     "slug",
     "category",
+    "category_path",
     "item_type",
     "description",
     "ingredients",

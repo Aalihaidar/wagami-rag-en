@@ -23,18 +23,19 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.agent.browse import DIRECT_INTENTS, direct_answer
+from app.agent.cards import Choices, CitedItem, cards_for_answer
 from app.agent.generation import (
     GENERATION_REASONING_EFFORT,
     MALFORMED_REPLY,
     SAFE_FALLBACK_REPLY,
     AnswerStreamDecoder,
-    CitedItem,
     LeakHoldback,
     build_context,
     build_user_prompt,
     citable_slugs,
     contains_system_prompt_leak,
     parse_generation_reply,
+    salvage_cited_slugs,
     temperature_for,
     tone_for,
 )
@@ -74,9 +75,13 @@ class AgentState(TypedDict, total=False):
     citable_slugs: Required[list[str]]
     answer: str
     cited_slugs: list[str]
-    # Item cards a direct reply supplies itself (a listing of a category's items). Absent on the
-    # search route, where the cards are chosen from `search_result` and `cited_slugs` instead.
+    # The item cards for this turn's answer. Written by whichever node ends the turn (`respond` or
+    # `answer`), every turn, an empty list when there are none -- the state is saved per session, so
+    # a node that skipped it would leave the previous turn's cards behind for the next answer.
     cited_items: list[CitedItem]
+    # The picture cards of a reply that lists groups or categories (rule C-23), or None. Written by
+    # both turn-ending nodes every turn, for the same reason as `cited_items`.
+    choices: Choices | None
     usage: dict[str, Any]
 
 
@@ -146,6 +151,7 @@ def _generate_answer(
             # The model didn't produce the requested JSON. Keep whatever is still usable, and
             # log it -- a rising rate of these means the prompt-only format has stopped holding.
             logger.warning("Generation reply was not the requested JSON object")
+            cited_slugs = salvage_cited_slugs(text, candidate_slugs)
             if decoder.text:
                 reply = decoder.text
             elif text.startswith(("{", "`")):
@@ -205,13 +211,16 @@ def build_graph(
         direct = direct_answer(understanding, category_index.catalog)
         reply = direct.text
         # The whole reply at once: there is no generation stream to forward. The caller still
-        # gets it as a delta, so /chat/stream and /chat behave the same on every route.
-        get_stream_writer()({"delta": reply})
+        # gets it as a delta, so /chat/stream and /chat behave the same on every route. A list of
+        # groups or categories streams only the sentence before its cards, which the final
+        # message keeps as its start, so the bullet list is never shown and then replaced.
+        get_stream_writer()({"delta": direct.choices["intro"] if direct.choices else reply})
         understand_usage = understanding["usage"]
         return {
             "answer": reply,
             "cited_slugs": [],
             "cited_items": direct.cards,
+            "choices": direct.choices,
             "usage": {
                 "understand": understand_usage,
                 "generate": zero_usage(),
@@ -241,6 +250,7 @@ def build_graph(
             context,
             search_result["relaxed_fields"],
             search_result["excluded_top_match"],
+            resolved_question=understanding["resolved_question"],
         )
         return {
             "tone": tone,
@@ -271,9 +281,19 @@ def build_graph(
             "generate": gen_usage,
             "total_tokens": understand_usage["total_tokens"] + gen_usage["total_tokens"],
         }
+        search_result = state["search_result"]
+        ranked = search_result["ranked"] if search_result["answerable"] else []
+        screened = search_result["excluded_top_match"]
         return {
             "answer": reply,
             "cited_slugs": cited_slugs,
+            "choices": None,
+            "cited_items": cards_for_answer(
+                reply,
+                ranked=ranked,
+                cited_slugs=cited_slugs,
+                screened_out=screened["name"] if screened else None,
+            ),
             "usage": usage,
             "history": [{"question": state["question"], "answer": reply}],
         }

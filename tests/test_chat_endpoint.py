@@ -176,32 +176,23 @@ class FakeGraph:
         return self._final_state
 
 
+VEGAN_RAMEN_CARD = {
+    "id": "abc-123",
+    "slug": "vegan-ramen",
+    "name": "Vegan Ramen",
+    "description": "Rich miso broth with tofu and greens.",
+    "ingredients": ["tofu", "miso", "soya"],
+    "price_gbp": 9.5,
+    "image": "vegan-ramen.png",
+}
+
+
 def test_chat_returns_answer_and_cited_items_with_overridden_graph() -> None:
     final_state = {
         "answer": "Our vegan ramen is £9.50.",
         "cited_slugs": ["vegan-ramen"],
+        "cited_items": [VEGAN_RAMEN_CARD],
         "usage": {"total_tokens": 42},
-        "search_result": {
-            "ranked": [
-                {
-                    "row": {
-                        "uuid": "abc-123",
-                        "score": 0.9,
-                        "properties": {
-                            "item_type": "menu_item",
-                            "slug": "vegan-ramen",
-                            "name": "Vegan Ramen",
-                            "description": "Rich miso broth with tofu and greens.",
-                            "ingredients": ["tofu", "miso", "soya"],
-                            "price_gbp": 9.5,
-                            "image": "vegan-ramen.png",
-                        },
-                    },
-                    "rerank": 0.9,
-                    "hybrid": 0.9,
-                }
-            ]
-        },
     }
     fake_graph = FakeGraph(final_state)
     fake_redis = FakeRedis()
@@ -214,22 +205,36 @@ def test_chat_returns_answer_and_cited_items_with_overridden_graph() -> None:
         body = response.json()
         assert body["answer"] == "Our vegan ramen is £9.50."
         assert body["session_id"] == "s1"
-        assert body["cited_items"] == [
-            {
-                "id": "abc-123",
-                "slug": "vegan-ramen",
-                "name": "Vegan Ramen",
-                "description": "Rich miso broth with tofu and greens.",
-                "ingredients": ["tofu", "miso", "soya"],
-                "price_gbp": 9.5,
-                "image": "vegan-ramen.png",
-            }
-        ]
+        assert body["cited_items"] == [VEGAN_RAMEN_CARD]
         assert fake_graph.invoke_calls[0]["config"] == {"configurable": {"thread_id": "s1"}}
         assert fake_redis.store  # token usage was recorded
     finally:
         app.dependency_overrides.pop(get_graph, None)
         app.dependency_overrides.pop(get_redis_client, None)
+
+
+def test_chat_cards_come_only_from_the_turns_own_cards_never_from_stale_state() -> None:
+    """The session's saved state still holds the previous search's rows and cited slugs; a turn
+    whose answer has no cards must not resurrect them."""
+    final_state = {
+        "answer": "Hello!",
+        "cited_slugs": ["vegan-ramen"],  # left over from an earlier turn
+        "cited_items": [],
+        "usage": {"total_tokens": 15},
+        "search_result": {
+            "ranked": [
+                {
+                    "row": {"uuid": "abc-123", "score": 0.9, "properties": VEGAN_RAMEN_CARD},
+                    "rerank": 0.9,
+                    "hybrid": 0.9,
+                }
+            ]
+        },
+    }
+    with _client_with(FakeGraph(final_state)) as client:
+        response = client.post("/chat", json={"session_id": "s1", "message": "hi"})
+
+    assert response.json()["cited_items"] == []
 
 
 def test_chat_logs_one_per_stage_timing_line_per_turn(caplog: pytest.LogCaptureFixture) -> None:
@@ -338,22 +343,14 @@ def test_delete_session_discards_history_with_overridden_checkpointer() -> None:
 
 # --- /chat/stream (Server-Sent Events) -------------------------------------------------------
 
-RANKED_ESPRESSO = {
-    "row": {
-        "uuid": "abc-123",
-        "score": 0.9,
-        "properties": {
-            "item_type": "menu_item",
-            "slug": "double-espresso",
-            "name": "Double Espresso",
-            "description": "Two shots.",
-            "ingredients": ["coffee"],
-            "price_gbp": 2.5,
-            "image": "espresso.png",
-        },
-    },
-    "rerank": 0.9,
-    "hybrid": 0.9,
+ESPRESSO_CARD = {
+    "id": "abc-123",
+    "slug": "double-espresso",
+    "name": "Double Espresso",
+    "description": "Two shots.",
+    "ingredients": ["coffee"],
+    "price_gbp": 2.5,
+    "image": "espresso.png",
 }
 
 
@@ -365,15 +362,14 @@ class FakeStreamingGraph(FakeGraph):
         self,
         deltas: list[str],
         *,
-        cited_slugs: list[str] | None = None,
+        cards: list[dict[str, Any]] | None = None,
         fail_after_deltas: Exception | None = None,
         history: list[Any] | None = None,
     ) -> None:
         final_state = {
             "answer": "".join(deltas),
-            "cited_slugs": cited_slugs or [],
+            "cited_items": cards or [],
             "usage": {"total_tokens": 42},
-            "search_result": {"ranked": [RANKED_ESPRESSO]},
         }
         super().__init__(final_state, history=history)
         self._deltas = deltas
@@ -418,9 +414,7 @@ def _post_stream(client: TestClient, message: str = "espresso price?") -> Any:
 
 
 def test_chat_stream_sends_deltas_then_a_done_event_with_the_full_response() -> None:
-    graph = FakeStreamingGraph(
-        ["Our double ", "espresso is ", "£2.50."], cited_slugs=["double-espresso"]
-    )
+    graph = FakeStreamingGraph(["Our double ", "espresso is ", "£2.50."], cards=[ESPRESSO_CARD])
     redis = FakeRedis()
     with _client_with(graph, redis) as client:
         response = _post_stream(client)
@@ -451,7 +445,15 @@ def test_chat_stream_is_blocked_by_the_conversation_cap_before_reaching_the_llm(
         response = _post_stream(client)
 
     assert _events(response.text) == [
-        ("done", {"session_id": "s1", "answer": CONVERSATION_LIMIT_REPLY, "cited_items": []})
+        (
+            "done",
+            {
+                "session_id": "s1",
+                "answer": CONVERSATION_LIMIT_REPLY,
+                "cited_items": [],
+                "choices": None,
+            },
+        )
     ]
     assert graph.stream_calls == []
 
@@ -609,3 +611,87 @@ def test_chat_stream_done_event_carries_the_cards_a_direct_reply_supplies() -> N
     done = _events(response.text)[-1]
     assert done[0] == "done"
     assert done[1]["cited_items"] == [LISTED_CARD]
+
+
+# --- a list of groups or categories comes with picture cards (rules R-14, C-23) -------------------
+
+MENU_CHOICES = {
+    "intro": "Our menu is organised into these categories:",
+    "outro": "What kind of these would you like to see?",
+    "cards": [
+        {"name": "drinks", "image": "drinks/cover.png"},
+        {"name": "sides", "image": "sides/cover.png"},
+    ],
+}
+MENU_LIST_TEXT = (
+    "Our menu is organised into these categories:\n- drinks\n- sides\n\n"
+    "What kind of these would you like to see?"
+)
+
+
+def test_chat_returns_the_choice_cards_of_a_list_reply_with_the_full_image_url() -> None:
+    final_state = {
+        "answer": MENU_LIST_TEXT,
+        "cited_items": [],
+        "choices": MENU_CHOICES,
+        "usage": {"total_tokens": 15},
+    }
+    with _client_with(FakeGraph(final_state)) as client:
+        body = client.post("/chat", json={"session_id": "s1", "message": "menu"}).json()
+
+    assert body["answer"] == MENU_LIST_TEXT  # the whole text, list included
+    assert body["cited_items"] == []
+    assert body["choices"]["intro"] == "Our menu is organised into these categories:"
+    assert body["choices"]["outro"] == "What kind of these would you like to see?"
+    assert [c["name"] for c in body["choices"]["cards"]] == ["drinks", "sides"]
+    # each group's own cover picture -- turned into a full URL, but not through the thumbnail
+    # pipeline
+    assert [c["image"].rsplit("/", 2)[-2:] for c in body["choices"]["cards"]] == [
+        ["drinks", "cover.png"],
+        ["sides", "cover.png"],
+    ]
+
+
+def test_chat_has_no_choices_when_the_turn_lists_none() -> None:
+    final_state = {"answer": "Hello!", "cited_items": [], "usage": {"total_tokens": 15}}
+    with _client_with(FakeGraph(final_state)) as client:
+        body = client.post("/chat", json={"session_id": "s1", "message": "hi"}).json()
+
+    assert body["choices"] is None
+
+
+def test_chat_cards_come_only_from_the_turns_own_choices_never_from_stale_state() -> None:
+    """The session's saved state may still hold an earlier list's cards; the graph writes `choices`
+    every turn, and the endpoint returns just that."""
+    final_state = {
+        "answer": "Hello!",
+        "cited_items": [],
+        "choices": None,
+        "usage": {"total_tokens": 15},
+    }
+    with _client_with(FakeGraph(final_state)) as client:
+        body = client.post("/chat", json={"session_id": "s1", "message": "hi"}).json()
+
+    assert body["choices"] is None
+
+
+def test_chat_stream_done_event_carries_the_choice_cards() -> None:
+    class ListGraph(FakeStreamingGraph):
+        def __init__(self) -> None:
+            super().__init__([MENU_CHOICES["intro"]])
+            self._final_state = {
+                "answer": MENU_LIST_TEXT,
+                "cited_items": [],
+                "choices": MENU_CHOICES,
+                "usage": {"total_tokens": 15},
+            }
+
+    with _client_with(ListGraph()) as client:
+        response = _post_stream(client, "menu")
+
+    events = _events(response.text)
+    assert [name for name, _ in events] == ["delta", "done"]
+    assert events[0][1] == {"text": MENU_CHOICES["intro"]}
+    assert MENU_LIST_TEXT.startswith(events[0][1]["text"])  # the delta is a prefix of the answer
+    assert events[-1][1]["choices"]["outro"] == "What kind of these would you like to see?"
+    assert [c["name"] for c in events[-1][1]["choices"]["cards"]] == ["drinks", "sides"]

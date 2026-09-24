@@ -24,10 +24,27 @@ class CitedItem(BaseModel):
     image: str
 
 
+class ChoiceCard(BaseModel):
+    name: str
+    image: str
+
+
+class Choices(BaseModel):
+    """A reply that lists groups or categories, cut around its list so the chat page can lay out
+    the opening sentence, a picture card per name, then the closing question."""
+
+    intro: str
+    outro: str
+    cards: list[ChoiceCard]
+
+
 class ChatResponse(BaseModel):
     session_id: str
+    # The whole reply as text. For a list of groups or categories that includes the bullet list;
+    # a client that shows `choices` instead lays out intro, cards and outro in its place.
     answer: str
     cited_items: list[CitedItem]
+    choices: Choices | None = None
 
 
 class SessionResponse(BaseModel):
