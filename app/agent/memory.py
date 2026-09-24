@@ -8,7 +8,7 @@ the eval harness actually verified is unchanged. Revisit/evaluate multi-turn fol
 resolution accuracy specifically (see docs/APP_AND_DEPLOYMENT_PLAN.md) before relying on it.
 """
 
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 MAX_HISTORY_TURNS = 3
 
@@ -16,6 +16,10 @@ MAX_HISTORY_TURNS = 3
 class HistoryTurn(TypedDict):
     question: str
     answer: str
+    # True for a group or category card click answered from the catalog with no model call
+    # (rule R-15): such a turn is free, so it does not count towards the conversation-turn cap
+    # (app/main.py's _precheck_reply()). Absent on every other turn.
+    card_click: NotRequired[bool]
 
 
 def build_history_context(history: list[HistoryTurn]) -> str:

@@ -14,7 +14,12 @@ bullet list would be; the text with the list is kept for history.
 
 When a browse reaches the items of a category, each item is described (description, ingredients,
 price) and gets a card with its image, exactly as in a single-dish answer -- again from the
-catalog, so it costs no search and no model call.
+catalog, so it costs no search and no model call. When every item in the category has an image,
+the reply is cut the same way as a groups/categories listing: an opening sentence, the item cards
+(which already carry the description, ingredients and price the bullet line would have shown),
+and a closing question, so the chat page shows the cards instead of the bullet list. An item with
+no image still needs the bullet line to be seen at all, so when any item lacks one, the bullet
+list is kept and shown alongside the cards, same as before.
 
 Wording lives in app/agent/prompts.py; this module only decides what to say and fills the lists.
 """
@@ -44,11 +49,18 @@ DIRECT_INTENTS = frozenset({"greeting", "off_topic", "menu_browse"})
 class DirectAnswer:
     """A direct reply: the text (whole, with any bullet list -- what is saved to history), the item
     cards to show under it (empty unless the reply lists a category's items), and, when the reply
-    lists groups or categories, that reply cut around its list with a card per name."""
+    lists groups or categories, that reply cut around its list with a card per name.
+
+    `intro`/`outro` are that same cut, but for a category's item listing (R-14/C-25): set only
+    when every item in the listing got a card, so the chat page can show the cards in place of
+    the bullet list instead of alongside it. None when an item had no image, or for any other
+    kind of reply."""
 
     text: str
     cards: list[CitedItem] = field(default_factory=list)
     choices: Choices | None = None
+    intro: str | None = None
+    outro: str | None = None
 
 
 def _options(names: list[str]) -> str:
@@ -105,7 +117,13 @@ def _items(catalog: MenuCatalog, group: str, category: str) -> DirectAnswer:
     text = CATEGORY_ITEMS_REPLY.format(
         label=label, options="\n".join(_describe(item) for item in items)
     )
-    return DirectAnswer(text, [card for item in items if (card := card_for_item(item)) is not None])
+    cards = [card for item in items if (card := card_for_item(item)) is not None]
+    if not cards or len(cards) < len(items):
+        # An item with no image would otherwise vanish from the reply entirely, so keep the
+        # bullet list as a fallback instead of cutting it away.
+        return DirectAnswer(text, cards)
+    intro, outro = CATEGORY_ITEMS_REPLY.format(label=label, options=_LIST_MARK).split(_LIST_MARK)
+    return DirectAnswer(text, cards, intro=intro.strip(), outro=outro.strip())
 
 
 def _group(catalog: MenuCatalog, group: str) -> DirectAnswer:

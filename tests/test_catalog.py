@@ -167,6 +167,9 @@ DETAIL_ROWS = [
         "ingredients": ["oat", "coffee"],
         "price_gbp": 2.5,
         "image": "b-latte.png",
+        "dietary_tags": ["vegan", "vegetarian"],
+        "allergens_contains": ["oats"],
+        "allergens_may_contain": ["nuts"],
     },
     {
         "id": "id-a",
@@ -190,6 +193,9 @@ def test_item_details_keep_what_a_listing_and_a_card_need() -> None:
     assert (latte.id, latte.name, latte.description) == ("id-b", "b Latte", "with oat")
     assert latte.ingredients == ("oat", "coffee")
     assert (latte.price_gbp, latte.image) == (2.5, "drinks/coffee-tea/b-latte.png")
+    assert latte.dietary_tags == ("vegan", "vegetarian")
+    assert latte.allergens_contains == ("oats",)
+    assert latte.allergens_may_contain == ("nuts",)
 
 
 def test_missing_details_are_none_or_empty_not_invented() -> None:
@@ -197,6 +203,7 @@ def test_missing_details_are_none_or_empty_not_invented() -> None:
 
     assert tea.name == "A Tea"
     assert (tea.description, tea.ingredients, tea.price_gbp, tea.image) == (None, (), None, None)
+    assert (tea.dietary_tags, tea.allergens_contains, tea.allergens_may_contain) == ((), (), ())
 
 
 def test_item_details_are_in_the_same_order_as_the_names() -> None:

@@ -2,7 +2,8 @@
 
 from typing import Any
 
-from app.agent.cards import card_for_row, cards_for_answer, cited_items_from_ranked
+from app.agent.cards import card_for_item, card_for_row, cards_for_answer, cited_items_from_ranked
+from app.agent.catalog import NUTRITION_FIELDS, MenuItem
 from app.retrieval import MenuRow, RerankHit
 
 
@@ -15,6 +16,10 @@ def make_row(
     ingredients: list[str] | None = None,
     price_gbp: float | None = 9.5,
     image: str = "",
+    dietary_tags: list[str] | None = None,
+    allergens_contains: list[str] | None = None,
+    allergens_may_contain: list[str] | None = None,
+    **details: Any,
 ) -> MenuRow:
     return {
         "uuid": f"uuid-{name}",
@@ -27,6 +32,10 @@ def make_row(
             "ingredients": ingredients or [],
             "price_gbp": price_gbp,
             "image": image,
+            "dietary_tags": dietary_tags or [],
+            "allergens_contains": allergens_contains or [],
+            "allergens_may_contain": allergens_may_contain or [],
+            **details,
         },
     }
 
@@ -59,15 +68,28 @@ def cards(
 
 
 def test_cited_items_from_ranked_includes_description_ingredients_and_price() -> None:
-    """The card is deliberately just name/description/ingredients/price/image -- dietary
-    tags, allergens, and nutrition are real CONTEXT fields (format_row()) the model can
-    state in the answer text itself, not duplicated here (Section 4)."""
+    """The card carries name/description/ingredients/price/image plus the rest of the dish's row
+    -- dietary tags, allergens, nutrition, category, portion, ABV -- for the single-dish detail
+    view (rule C-26). A listing's or a multi-dish answer's gallery card still only *displays* the
+    first group -- the model can also state any of this in the answer text itself (Section 4)."""
     ramen = make_row(
         "vegan ramen",
         description="Rich miso broth.",
         ingredients=["tofu", "miso", "soya"],
         price_gbp=9.5,
         image="r.png",
+        dietary_tags=["vegan", "vegetarian"],
+        allergens_contains=["soya"],
+        category="ramen",
+        category_path=["the main event", "ramen"],
+        kcal=512.0,
+        protein_g=20.1,
+        salt_g=4,  # an int from the store still comes out as a float
+        is_gluten_free_listed=True,
+        portion_value=1.0,
+        portion_unit="ea",
+        servings="1",
+        abv_percent=None,
     )
     espresso = make_row(
         "double espresso", description=None, ingredients=["coffee"], price_gbp=2.5, image="e.png"
@@ -88,7 +110,23 @@ def test_cited_items_from_ranked_includes_description_ingredients_and_price() ->
             "description": "Rich miso broth.",
             "ingredients": ["tofu", "miso", "soya"],
             "price_gbp": 9.5,
-            "image": "r.png",
+            "image": "the-main-event/ramen/r.png",
+            "dietary_tags": ["vegan", "vegetarian"],
+            "allergens_contains": ["soya"],
+            "allergens_may_contain": [],
+            "category": "ramen",
+            "category_path": ["the main event", "ramen"],
+            "nutrition": {
+                **{name: None for name in NUTRITION_FIELDS},
+                "kcal": 512.0,
+                "protein_g": 20.1,
+                "salt_g": 4.0,
+            },
+            "is_gluten_free_listed": True,
+            "portion_value": 1.0,
+            "portion_unit": "ea",
+            "servings": "1",
+            "abv_percent": None,
         },
         {
             "id": "uuid-double espresso",
@@ -98,8 +136,72 @@ def test_cited_items_from_ranked_includes_description_ingredients_and_price() ->
             "ingredients": ["coffee"],
             "price_gbp": 2.5,
             "image": "e.png",
+            "dietary_tags": [],
+            "allergens_contains": [],
+            "allergens_may_contain": [],
+            "category": None,
+            "category_path": [],
+            "nutrition": {name: None for name in NUTRITION_FIELDS},
+            "is_gluten_free_listed": False,
+            "portion_value": None,
+            "portion_unit": None,
+            "servings": None,
+            "abv_percent": None,
         },
     ]
+
+
+def test_card_for_item_carries_dietary_tags_and_allergens() -> None:
+    """The direct-route card (app/agent/browse.py's listings) needs the same fields as a search
+    answer's card, for the single-dish detail view (rule C-26)."""
+    nutrition = tuple((name, 1.5 if name == "kcal" else None) for name in NUTRITION_FIELDS)
+    item = MenuItem(
+        id="id-1",
+        slug="vegan-ramen",
+        name="Vegan Ramen",
+        description="Rich miso broth.",
+        ingredients=("tofu", "miso", "soya"),
+        price_gbp=9.5,
+        image="drinks/ramen/vegan-ramen.png",
+        dietary_tags=("vegan", "vegetarian"),
+        allergens_contains=("soya",),
+        allergens_may_contain=("sesame",),
+        category="ramen",
+        category_path=("the main event", "ramen"),
+        nutrition=nutrition,
+        is_gluten_free_listed=True,
+        portion_value=1.0,
+        portion_unit="ea",
+        servings="1",
+        abv_percent=0.0,
+    )
+
+    assert card_for_item(item) == {
+        "id": "id-1",
+        "slug": "vegan-ramen",
+        "name": "Vegan Ramen",
+        "description": "Rich miso broth.",
+        "ingredients": ["tofu", "miso", "soya"],
+        "price_gbp": 9.5,
+        "image": "drinks/ramen/vegan-ramen.png",
+        "dietary_tags": ["vegan", "vegetarian"],
+        "allergens_contains": ["soya"],
+        "allergens_may_contain": ["sesame"],
+        "category": "ramen",
+        "category_path": ["the main event", "ramen"],
+        "nutrition": dict(nutrition),
+        "is_gluten_free_listed": True,
+        "portion_value": 1.0,
+        "portion_unit": "ea",
+        "servings": "1",
+        "abv_percent": 0.0,
+    }
+
+
+def test_card_for_item_with_no_image_is_none() -> None:
+    item = MenuItem(id="id-1", slug="no-photo", name="No Photo")
+
+    assert card_for_item(item) is None
 
 
 def test_cited_items_from_ranked_excludes_dishes_not_cited_by_the_model() -> None:

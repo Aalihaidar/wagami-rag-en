@@ -22,6 +22,12 @@
   --error-bubble: #fdecea;
   --error-border: #c0392b;
   --focus-ring: #2f6fb3;
+  --dietary-bg: #e3f5ef;
+  --dietary-text: #016b5d;
+  --allergen-contains-bg: #fdecea;
+  --allergen-contains-text: #c0392b;
+  --allergen-may-bg: #fdf3e3;
+  --allergen-may-text: #8a5a00;
   --radius: 14px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -48,6 +54,12 @@
     --error-bubble: #3a2020;
     --error-border: #ef5350;
     --focus-ring: #7db2e8;
+    --dietary-bg: #123832;
+    --dietary-text: #6fe0c6;
+    --allergen-contains-bg: #3a2020;
+    --allergen-contains-text: #ff8a80;
+    --allergen-may-bg: #3a2f14;
+    --allergen-may-text: #ffd479;
   }
 }
 
@@ -239,10 +251,14 @@ body {
   overflow: hidden;
 }
 
+/* `contain`, not `cover`: the whole photo is shown, never cropped -- a tall bottle or a wide
+   plate is scaled down to fit the frame instead of losing its top and bottom. The photos have
+   transparent or plain backgrounds, so the spare space around them reads as card, not as bars. */
 .item-card__image {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  padding: 6px;
+  object-fit: contain;
   display: block;
   transition: transform 0.2s ease;
 }
@@ -294,12 +310,254 @@ body {
   overflow: hidden;
 }
 
+/* Dietary tags and allergens on a gallery card (rule R-17): the detail view's pills, smaller. */
+.item-card__pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.item-card__pill {
+  padding: 1px 7px;
+  font-size: 0.68rem;
+}
+
 .item-card__price {
   margin: 2px 0 0;
   font-weight: 600;
   font-size: 0.85rem;
   color: var(--accent);
   white-space: normal;
+}
+
+/* A single-dish answer (rules R-16, C-26), top to bottom: the assistant's short written answer,
+   a large picture, then everything the dish's row holds as a panel -- header (name + price),
+   badges, description, then titled sections: a nutrition grid, allergen pills, ingredient chips
+   and a details list. Only used when the answer cites exactly one dish -- a comparison or a
+   listing still uses the gallery of small .item-cards above. */
+.item-detail__answer {
+  margin: 0;
+  padding: 12px 16px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.item-detail__image-frame {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  background: var(--border);
+}
+
+.item-detail__image {
+  width: 100%;
+  height: 100%;
+  padding: 8px;
+  object-fit: contain; /* the whole photo, never cropped -- same as .item-card__image */
+  display: block;
+}
+
+/* Fills the whole bubble edge to edge, same reasoning as .message:has(> .choice-cards). Not
+   `overflow: hidden`: that would also clip the bot avatar, which is drawn outside the bubble's
+   left edge (.message--assistant::before). The picture sits below the answer, away from the
+   bubble's rounded corners, so nothing needs clipping -- and when there is no answer text above
+   it, the picture rounds its own top corners instead. */
+.message:has(> .item-detail__image-frame) {
+  width: 100%;
+  padding: 0;
+  white-space: normal;
+}
+
+.item-detail__image-frame:first-child {
+  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
+}
+
+.item-detail__body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.item-detail__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.item-detail__name {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--text);
+}
+
+.item-detail__price {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.item-detail__pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.item-detail__tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.35;
+  background: var(--dietary-bg);
+  color: var(--dietary-text);
+}
+
+.item-detail__tag--contains {
+  background: var(--allergen-contains-bg);
+  color: var(--allergen-contains-text);
+}
+
+.item-detail__tag--may-contain {
+  background: var(--allergen-may-bg);
+  color: var(--allergen-may-text);
+}
+
+/* Ingredients: quiet outlined chips, so the coloured ones above keep their meaning. */
+.item-detail__tag--plain {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.item-detail__description {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.item-detail__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.item-detail__section-title {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.item-detail__nutrition {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));
+  gap: 6px;
+}
+
+.item-detail__nutrient {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.item-detail__nutrient--energy {
+  border-color: var(--accent);
+}
+
+.item-detail__nutrient-value {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.item-detail__nutrient-unit {
+  margin-left: 2px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.item-detail__nutrient-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.item-detail__allergens {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.item-detail__allergen-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.item-detail__allergen-label {
+  min-width: 6.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.item-detail__note {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.item-detail__list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.item-detail__list-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: 0.9rem;
+}
+
+.item-detail__list-row + .item-detail__list-row {
+  border-top: 1px dashed var(--border);
+}
+
+.item-detail__list-label {
+  color: var(--text-muted);
+}
+
+.item-detail__list-value {
+  margin: 0;
+  font-weight: 600;
+  text-align: right;
+  color: var(--text);
 }
 
 /* A list of groups or categories, laid out between the reply's opening sentence and its closing
@@ -658,7 +916,7 @@ body {
     --gutter: 12px;
   }
 
-  .message:has(> .item-cards, > .choice-cards) {
+  .message:has(> .item-cards, > .choice-cards, > .item-detail__image-frame) {
     max-width: calc(100% - var(--avatar-offset));
   }
 

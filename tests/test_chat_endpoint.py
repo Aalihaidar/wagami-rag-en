@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.agent.memory import HistoryTurn
 from app.config import Settings
 from app.cost_control import CAPACITY_REPLY, CONVERSATION_LIMIT_REPLY, _daily_key
 from app.main import app, get_checkpointer, get_graph, get_redis_client
@@ -184,6 +185,17 @@ VEGAN_RAMEN_CARD = {
     "ingredients": ["tofu", "miso", "soya"],
     "price_gbp": 9.5,
     "image": "vegan-ramen.png",
+    "dietary_tags": ["vegan"],
+    "allergens_contains": ["soya"],
+    "allergens_may_contain": [],
+    "category": "ramen",
+    "category_path": ["the main event", "ramen"],
+    "nutrition": {"kcal": 512.0, "protein_g": 20.1, "salt_g": None},
+    "is_gluten_free_listed": False,
+    "portion_value": 1.0,
+    "portion_unit": "ea",
+    "servings": "1",
+    "abv_percent": None,
 }
 
 
@@ -279,6 +291,36 @@ def test_chat_returns_a_fixed_reply_once_conversation_turn_cap_is_hit() -> None:
         app.dependency_overrides.pop(get_redis_client, None)
 
 
+def test_group_and_category_card_clicks_do_not_count_towards_the_turn_cap() -> None:
+    """A card click answered from the catalog costs no model call, so a session full of them
+    (plus one turn short of the cap) still gets its next answer."""
+    history: list[HistoryTurn] = [
+        {"question": f"Show me g{i}", "answer": f"a{i}", "card_click": True} for i in range(50)
+    ]
+    cap = main_module.settings.max_conversation_turns
+    history.extend({"question": f"q{i}", "answer": f"a{i}"} for i in range(cap - 1))
+    fake_graph = FakeGraph(
+        {"answer": "Here you go.", "usage": {"total_tokens": 5}}, history=history
+    )
+    with _client_with(fake_graph) as client:
+        response = client.post("/chat", json={"session_id": "s1", "message": "one more"})
+
+    assert response.json()["answer"] == "Here you go."
+    assert len(fake_graph.invoke_calls) == 1
+
+
+def test_the_turn_cap_still_counts_every_turn_that_is_not_a_card_click() -> None:
+    cap = main_module.settings.max_conversation_turns
+    history: list[HistoryTurn] = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(cap)]
+    history.append({"question": "Show me drinks", "answer": "a", "card_click": True})
+    fake_graph = FakeGraph({"answer": "unused", "usage": {"total_tokens": 0}}, history=history)
+    with _client_with(fake_graph) as client:
+        response = client.post("/chat", json={"session_id": "s1", "message": "one more"})
+
+    assert response.json()["answer"] == CONVERSATION_LIMIT_REPLY
+    assert fake_graph.invoke_calls == []
+
+
 def test_chat_returns_capacity_reply_once_daily_spend_limit_is_hit() -> None:
     fake_graph = FakeGraph({"answer": "unused", "usage": {"total_tokens": 0}})
     fake_redis = FakeRedis()
@@ -351,6 +393,9 @@ ESPRESSO_CARD = {
     "ingredients": ["coffee"],
     "price_gbp": 2.5,
     "image": "espresso.png",
+    "dietary_tags": ["vegetarian"],
+    "allergens_contains": [],
+    "allergens_may_contain": [],
 }
 
 
@@ -452,6 +497,8 @@ def test_chat_stream_is_blocked_by_the_conversation_cap_before_reaching_the_llm(
                 "answer": CONVERSATION_LIMIT_REPLY,
                 "cited_items": [],
                 "choices": None,
+                "intro": None,
+                "outro": None,
             },
         )
     ]
@@ -577,6 +624,17 @@ LISTED_CARD = {
     "ingredients": ["lychee"],
     "price_gbp": 8.0,
     "image": "lychee.png",
+    "dietary_tags": [],
+    "allergens_contains": ["sulphites"],
+    "allergens_may_contain": [],
+    "category": "cocktails",
+    "category_path": ["drinks", "cocktails"],
+    "nutrition": {"kcal": 180.0},
+    "is_gluten_free_listed": False,
+    "portion_value": 1.0,
+    "portion_unit": "ea",
+    "servings": "1",
+    "abv_percent": 7.5,
 }
 
 

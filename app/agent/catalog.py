@@ -23,6 +23,19 @@ from typing import Any
 
 from app.agent.choice_images import dish_image_path
 
+# The per-serving nutrition figures, in the order a dish's facts list them.
+NUTRITION_FIELDS = (
+    "kcal",
+    "protein_g",
+    "carbs_g",
+    "sugars_g",
+    "fat_g",
+    "sat_fat_g",
+    "fibre_g",
+    "sodium_g",
+    "salt_g",
+)
+
 # Fields read from each row to build the catalog (a subset of the collection's properties).
 CATALOG_PROPERTIES = [
     "item_type",
@@ -42,6 +55,10 @@ CATALOG_PROPERTIES = [
     "ingredients",
     "price_gbp",
     "image",
+    # the rest of a dish's facts, shown by the single-dish detail view (rule C-26)
+    *NUTRITION_FIELDS,
+    "portion_value",
+    "abv_percent",
 ]
 
 # The fields whose values form a small closed set, so the prompt can list every one of them.
@@ -73,11 +90,34 @@ class MenuItem:
     ingredients: tuple[str, ...] = ()
     price_gbp: float | None = None
     image: str | None = None  # the photo's path in the image tree, not the row's bare filename
+    dietary_tags: tuple[str, ...] = ()
+    allergens_contains: tuple[str, ...] = ()
+    allergens_may_contain: tuple[str, ...] = ()
+    # The rest of the dish's row, for the single-dish detail view (rule C-26).
+    category: str | None = None
+    category_path: tuple[str, ...] = ()
+    nutrition: tuple[tuple[str, float | None], ...] = ()  # (field, value) in NUTRITION_FIELDS order
+    is_gluten_free_listed: bool = False
+    portion_value: float | None = None
+    portion_unit: str | None = None
+    servings: str | None = None
+    abv_percent: float | None = None
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def _text(value: Any) -> str | None:
+    return value.strip() or None if isinstance(value, str) else None
+
+
+def _strings(value: Any) -> tuple[str, ...]:
+    return tuple(v for v in value if isinstance(v, str)) if isinstance(value, list) else ()
 
 
 def _menu_item(row: Mapping[str, Any], name: str) -> MenuItem:
     description = row.get("description")
-    ingredients = row.get("ingredients")
     price = row.get("price_gbp")
     image = row.get("image")
     return MenuItem(
@@ -85,11 +125,20 @@ def _menu_item(row: Mapping[str, Any], name: str) -> MenuItem:
         slug=str(row.get("slug") or ""),
         name=name,
         description=description.strip() or None if isinstance(description, str) else None,
-        ingredients=tuple(i for i in ingredients if isinstance(i, str))
-        if isinstance(ingredients, list)
-        else (),
+        ingredients=_strings(row.get("ingredients")),
         price_gbp=float(price) if isinstance(price, int | float) else None,
         image=dish_image_path(_path(row), image) if isinstance(image, str) and image else None,
+        dietary_tags=_strings(row.get("dietary_tags")),
+        allergens_contains=_strings(row.get("allergens_contains")),
+        allergens_may_contain=_strings(row.get("allergens_may_contain")),
+        category=_text(row.get("category")),
+        category_path=tuple(_path(row)),
+        nutrition=tuple((f, _number(row.get(f))) for f in NUTRITION_FIELDS),
+        is_gluten_free_listed=row.get("is_gluten_free_listed") is True,
+        portion_value=_number(row.get("portion_value")),
+        portion_unit=_text(row.get("portion_unit")),
+        servings=_text(str(row["servings"])) if row.get("servings") is not None else None,
+        abv_percent=_number(row.get("abv_percent")),
     )
 
 

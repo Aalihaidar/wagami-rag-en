@@ -24,7 +24,7 @@ logger = logging.getLogger("app.errors")
 INTERNAL_ERROR_MESSAGE = "Something went wrong on our end. Please try again."
 
 OUTBOUND_ERROR_REPLY = (
-    "Sorry, I'm having trouble reaching one of my backend services right now -- please try "
+    "Sorry, I'm having trouble reaching one of my backend services right now. Please try "
     "again in a moment."
 )
 

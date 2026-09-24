@@ -17,11 +17,11 @@ logger = logging.getLogger("app.cost_control")
 
 CONVERSATION_LIMIT_REPLY = (
     "This conversation has gotten pretty long! Please start a new chat so I can keep giving "
-    'you my full attention -- look for the "New chat" button.'
+    'you my full attention. Look for the "New chat" button.'
 )
 
 CAPACITY_REPLY = (
-    "This demo is temporarily at capacity for today -- please check back later. Sorry for "
+    "This demo is temporarily at capacity for today. Please check back later. Sorry for "
     "the inconvenience!"
 )
 

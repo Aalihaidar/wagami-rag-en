@@ -10,14 +10,16 @@
 const SESSION_STORAGE_KEY = "chatSessionId";
 const MAX_MESSAGE_LENGTH = 500;
 const NEAR_BOTTOM_THRESHOLD_PX = 80;
+// Space left above a new reply when the chat scrolls to its start.
+const REPLY_TOP_GAP_PX = 12;
 
 const INTRO_MESSAGE =
   "This is a demo restaurant chatbot built by ENG Ali Haidar to showcase a retrieval-grounded " +
   "AI assistant. It runs on free-tier tools, so responses may be slower or less polished " +
-  "than a production deployment would be -- ask about menu items, prices, nutrition, " +
+  "than a production deployment would be. Ask about menu items, prices, nutrition, " +
   "allergens, or general FAQs.\n\n" +
-  "As this is just a demo, I can't place an order or help with a severe-allergy emergency -- " +
-  "a real restaurant deployment could add both.";
+  "As this is just a demo, I can't place an order or help with a severe-allergy emergency. " +
+  "A real restaurant deployment could add both.";
 
 const messageLog = document.getElementById("message-log");
 const composer = document.getElementById("composer");
@@ -32,16 +34,55 @@ const lightboxClose = document.getElementById("lightbox-close");
 let sessionId = null;
 let inFlightController = null;
 let lightboxTrigger = null;
+let stopFollowingReply = () => {};
+
+// The page itself scrolls, not the message log: the log grows with the conversation and the
+// composer area is sticky at the bottom of the window (chat.css's .page / .composer-area).
+const pageScroller = document.scrollingElement || document.documentElement;
 
 function isNearBottom() {
   return (
-    messageLog.scrollHeight - messageLog.scrollTop - messageLog.clientHeight <
+    pageScroller.scrollHeight - pageScroller.scrollTop - pageScroller.clientHeight <
     NEAR_BOTTOM_THRESHOLD_PX
   );
 }
 
 function scrollToBottom() {
-  messageLog.scrollTo({ top: messageLog.scrollHeight, behavior: "smooth" });
+  window.scrollTo({ top: pageScroller.scrollHeight, behavior: "smooth" });
+}
+
+// Keys that scroll the page when pressed outside the message box.
+const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
+
+/** Scrolls the page so a new reply starts at the top of the window, and keeps doing so while the
+ * reply grows (streamed text, cards, pictures loading) until its start has reached the top --
+ * from there the guest reads down at their own pace, never pushed along by the text. A short
+ * reply that cannot reach the top just leaves the page at its bottom. Stops at once if the guest
+ * scrolls by hand, and when the next message is sent. */
+function followReplyStart(bubble) {
+  stopFollowingReply();
+  const align = () => {
+    const target = bubble.getBoundingClientRect().top + window.scrollY - REPLY_TOP_GAP_PX;
+    // Instant, not smooth: this runs on every chunk, and queued smooth scrolls would lag.
+    window.scrollTo({ top: target, behavior: "instant" });
+    if (window.scrollY >= target - 1) stopFollowingReply();
+  };
+  const onKey = (event) => {
+    if (SCROLL_KEYS.has(event.key) && event.target !== messageInput) stop();
+  };
+  const observer = new ResizeObserver(align);
+  const stop = () => {
+    observer.disconnect();
+    window.removeEventListener("wheel", stop);
+    window.removeEventListener("touchmove", stop);
+    window.removeEventListener("keydown", onKey);
+    stopFollowingReply = () => {};
+  };
+  stopFollowingReply = stop;
+  window.addEventListener("wheel", stop, { passive: true });
+  window.addEventListener("touchmove", stop, { passive: true });
+  window.addEventListener("keydown", onKey);
+  observer.observe(bubble);
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -71,9 +112,10 @@ function buildZoomButton(src, name) {
 
 /** A card's name as the button that asks about the card (rule R-15): its ::after stretches over
  * the whole card, so a click anywhere on it -- picture included -- sends `question`, with
- * `browse` for a group or category card. The question is not shown as a guest bubble -- the
- * reply just appears -- but the server still saves it to history, so a follow-up can refer to
- * it. Ignored while a reply is still in flight, like the composer. */
+ * `browse` for a group or category card. The chat shows only the card's name as the guest's
+ * message, as if they had typed it; the full question is what the server answers and saves to
+ * history, so a follow-up can refer to it. Ignored while a reply is still in flight, like the
+ * composer. */
 function buildAskButton(className, name, question, browse = null) {
   const button = document.createElement("button");
   button.type = "button";
@@ -82,7 +124,7 @@ function buildAskButton(className, name, question, browse = null) {
   button.setAttribute("aria-label", question);
   button.addEventListener("click", () => {
     if (messageInput.disabled || !sessionId) return;
-    sendMessage(question, { browse, showGuestBubble: false });
+    sendMessage(question, { browse, displayText: name });
   });
   return button;
 }
@@ -127,6 +169,24 @@ function buildItemCard(item) {
     body.appendChild(ingredients);
   }
 
+  // Dietary tags and allergens as small pills (rule R-17): with them on the card, a multi-dish
+  // answer need not list its dishes.
+  const pills = el("div", "item-card__pills");
+  const groups = [
+    [item.dietary_tags, ""],
+    [item.allergens_contains, "item-detail__tag--contains"],
+    [item.allergens_may_contain, "item-detail__tag--may-contain"],
+  ];
+  for (const [values, tagClassName] of groups) {
+    for (const value of values || []) {
+      const pill = el("span", `item-detail__tag item-card__pill ${tagClassName}`.trim(), value);
+      if (tagClassName === "item-detail__tag--may-contain") pill.title = "May contain";
+      if (tagClassName === "item-detail__tag--contains") pill.title = "Contains";
+      pills.appendChild(pill);
+    }
+  }
+  if (pills.childElementCount > 0) body.appendChild(pills);
+
   if (item.price_gbp != null) {
     const price = document.createElement("p");
     price.className = "item-card__price";
@@ -138,6 +198,34 @@ function buildItemCard(item) {
   return card;
 }
 
+/** Lower-case words with punctuation dropped, so "Double Dutch Ginger-Beer" and "double dutch
+ * ginger beer" compare equal -- the same comparison as the server's catalog.normalise(). */
+function normaliseName(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+// A list line: "- ", "* ", "• ", "– " or "1. " / "1) " at its start.
+const LIST_LINE = /^\s*(?:[-*•–]|\d+[.)])\s+/;
+
+/** A multi-dish answer's text without its list of those dishes (rule R-17, C-27): each list
+ * line that names one of the cards' dishes is dropped, since the card shows it. Everything else
+ * stays. Display only -- the saved answer keeps the full text. */
+function withoutListedDishes(text, items) {
+  const names = items.map((item) => normaliseName(item.name)).filter(Boolean);
+  const kept = text.split("\n").filter((line) => {
+    if (!LIST_LINE.test(line)) return true;
+    const words = ` ${normaliseName(line)} `;
+    return !names.some((name) => words.includes(` ${name} `));
+  });
+  return kept
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /** Appends the cited-item cards under a bubble's text. */
 function appendItemCards(bubble, items) {
   if (items.length === 0) return;
@@ -147,6 +235,172 @@ function appendItemCards(bubble, items) {
     gallery.appendChild(buildItemCard(item));
   }
   bubble.appendChild(gallery);
+}
+
+/** The nutrition figures of the single-dish view, in the card's `nutrition` order: the label
+ * and unit each is shown with. */
+const NUTRITION_LABELS = {
+  kcal: ["Energy", "kcal"],
+  protein_g: ["Protein", "g"],
+  carbs_g: ["Carbs", "g"],
+  sugars_g: ["Sugars", "g"],
+  fat_g: ["Fat", "g"],
+  sat_fat_g: ["Saturates", "g"],
+  fibre_g: ["Fibre", "g"],
+  sodium_g: ["Sodium", "g"],
+  salt_g: ["Salt", "g"],
+};
+
+/** How a portion unit from the corpus reads on the page ("1 ea" -> "1 each"). */
+const PORTION_UNITS = { ea: "each" };
+
+/** A number as the corpus gives it, without float noise (15.3, not 15.299999). */
+function formatNumber(value) {
+  return value.toLocaleString("en-GB", { maximumFractionDigits: 2 });
+}
+
+/** An element with a class and, optionally, its text (always textContent, never HTML). */
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+/** One titled section of the single-dish panel, or null when it has nothing to show. */
+function buildDetailSection(title, content) {
+  if (!content) return null;
+  const section = el("section", "item-detail__section");
+  section.appendChild(el("h4", "item-detail__section-title", title));
+  section.appendChild(content);
+  return section;
+}
+
+/** A row of pill tags, or null for an empty list. `tagClassName` picks the colour. */
+function buildPills(values, tagClassName = "") {
+  if (!values || values.length === 0) return null;
+  const list = el("div", "item-detail__pills");
+  for (const value of values) {
+    list.appendChild(el("span", `item-detail__tag ${tagClassName}`.trim(), value));
+  }
+  return list;
+}
+
+/** The per-serving nutrition as a grid of tiles, energy first; a figure the row has no value
+ * for is left out. Null when there is none at all. */
+function buildNutritionGrid(nutrition) {
+  const grid = el("div", "item-detail__nutrition");
+  for (const [field, [label, unit]] of Object.entries(NUTRITION_LABELS)) {
+    const value = nutrition?.[field];
+    if (value == null) continue;
+    const tile = el("div", "item-detail__nutrient");
+    if (field === "kcal") tile.classList.add("item-detail__nutrient--energy");
+    const amount = el("span", "item-detail__nutrient-value", formatNumber(value));
+    amount.appendChild(el("span", "item-detail__nutrient-unit", unit));
+    tile.appendChild(amount);
+    tile.appendChild(el("span", "item-detail__nutrient-label", label));
+    grid.appendChild(tile);
+  }
+  return grid.childElementCount > 0 ? grid : null;
+}
+
+/** "Contains" and "May contain" as coloured pills, or a plain line when neither lists any. */
+function buildAllergens(item) {
+  const box = el("div", "item-detail__allergens");
+  const groups = [
+    ["Contains", item.allergens_contains, "item-detail__tag--contains"],
+    ["May contain", item.allergens_may_contain, "item-detail__tag--may-contain"],
+  ];
+  for (const [label, allergens, tagClassName] of groups) {
+    const pills = buildPills(allergens, tagClassName);
+    if (!pills) continue;
+    const row = el("div", "item-detail__allergen-row");
+    row.appendChild(el("span", "item-detail__allergen-label", label));
+    row.appendChild(pills);
+    box.appendChild(row);
+  }
+  if (box.childElementCount === 0) {
+    box.appendChild(el("p", "item-detail__note", "No allergens declared."));
+  }
+  return box;
+}
+
+/** The rest of the row as label/value pairs: where it sits on the menu, the gluten-free menu,
+ * ABV for a drink, portion and servings. Null when there is nothing to list. */
+function buildDetailList(item) {
+  const rows = [];
+  if (item.category_path && item.category_path.length > 0) {
+    rows.push(["Menu", item.category_path.join(" › ")]);
+  }
+  rows.push(["Gluten-free menu", item.is_gluten_free_listed ? "Yes" : "No"]);
+  if (item.abv_percent != null) {
+    rows.push([
+      "Alcohol",
+      item.abv_percent > 0 ? `${formatNumber(item.abv_percent)}% ABV` : "Alcohol-free",
+    ]);
+  }
+  if (item.portion_value != null) {
+    const unit = PORTION_UNITS[item.portion_unit] ?? item.portion_unit ?? "";
+    rows.push(["Portion", `${formatNumber(item.portion_value)} ${unit}`.trim()]);
+  }
+  if (item.servings) rows.push(["Serves", item.servings]);
+
+  const list = el("dl", "item-detail__list");
+  for (const [label, value] of rows) {
+    const row = el("div", "item-detail__list-row");
+    row.appendChild(el("dt", "item-detail__list-label", label));
+    row.appendChild(el("dd", "item-detail__list-value", value));
+    list.appendChild(row);
+  }
+  return list;
+}
+
+/** Lays out a single-dish answer (rules R-16, C-26), top to bottom: the assistant's written
+ * answer (kept short by the prompt, G-11), a large picture (click to zoom, same as a card's),
+ * then everything the dish's row holds for a guest -- name and price, dietary tags,
+ * description, nutrition, allergens, ingredients and the remaining details -- as a structured
+ * panel. Used only when the answer cites exactly one dish, not a listing (which gets its own
+ * cut, layOutItemListing()) or a multi-dish comparison (which keeps the plain-text answer with a
+ * gallery of small cards below it). Replaces whatever the bubble held. */
+function layOutItemDetail(bubble, answer, item) {
+  bubble.textContent = "";
+
+  if (answer) bubble.appendChild(el("p", "item-detail__answer", answer));
+
+  const frame = el("div", "item-detail__image-frame");
+  const img = el("img", "item-detail__image");
+  img.src = item.image;
+  img.alt = item.name;
+  img.loading = "lazy";
+  frame.appendChild(img);
+  frame.appendChild(buildZoomButton(item.image, item.name));
+  bubble.appendChild(frame);
+
+  const body = el("div", "item-detail__body");
+
+  const header = el("div", "item-detail__header");
+  header.appendChild(el("h3", "item-detail__name", item.name));
+  if (item.price_gbp != null) {
+    header.appendChild(el("span", "item-detail__price", `£${item.price_gbp.toFixed(2)}`));
+  }
+  body.appendChild(header);
+
+  const badges = [...(item.dietary_tags || [])];
+  if (item.is_gluten_free_listed) badges.push("gluten-free menu");
+  const tags = buildPills(badges);
+  if (tags) body.appendChild(tags);
+
+  if (item.description) body.appendChild(el("p", "item-detail__description", item.description));
+
+  const sections = [
+    buildDetailSection("Nutrition per serving", buildNutritionGrid(item.nutrition)),
+    buildDetailSection("Allergens", buildAllergens(item)),
+    buildDetailSection("Ingredients", buildPills(item.ingredients, "item-detail__tag--plain")),
+    buildDetailSection("Details", buildDetailList(item)),
+  ];
+  for (const section of sections) if (section) body.appendChild(section);
+
+  bubble.appendChild(body);
 }
 
 /** One group or category in a list of them: its cover picture and its name. A click on the card
@@ -203,46 +457,70 @@ function layOutChoices(bubble, choices) {
   bubble.appendChild(outro);
 }
 
-/** Puts a finished reply into a bubble: its text (or, for a list of groups or categories, the
- * opening sentence, the cards and the closing question), then any item cards. `answer` is
- * authoritative, so it replaces the streamed preview. Keeps the view pinned to the bottom only
- * if the guest hadn't scrolled away. */
-function showReply(bubble, data) {
-  const shouldScroll = isNearBottom();
-  if (data.choices) {
-    layOutChoices(bubble, data.choices);
+/** Lays out a reply that lists a category's items: the opening sentence, an item card per dish
+ * where the bullet list would be, then the closing question -- the same cut as layOutChoices(),
+ * but with item cards (rule C-25). Replaces whatever the bubble held. */
+function layOutItemListing(bubble, intro, outro, items) {
+  bubble.textContent = "";
+
+  const introEl = document.createElement("div");
+  introEl.className = "message__part";
+  introEl.textContent = intro;
+  bubble.appendChild(introEl);
+
+  appendItemCards(bubble, items);
+
+  const outroEl = document.createElement("div");
+  outroEl.className = "message__part";
+  outroEl.textContent = outro;
+  bubble.appendChild(outroEl);
+}
+
+/** Lays out a finished reply's body into `bubble`: a list of groups/categories as picture cards,
+ * a category's item listing as item cards (both in place of the bullet list), a single cited
+ * dish as the large image-and-facts detail view (rule C-26), or plain text with any item cards
+ * appended below it (a comparison or recommendation citing several dishes at once). */
+function layOutBody(bubble, { answer, cited_items: items = [], choices = null, intro, outro }) {
+  if (choices) {
+    layOutChoices(bubble, choices);
+    appendItemCards(bubble, items);
+  } else if (intro != null && outro != null) {
+    layOutItemListing(bubble, intro, outro, items);
+  } else if (items.length === 1) {
+    layOutItemDetail(bubble, answer, items[0]);
   } else {
-    bubble.textContent = data.answer;
+    bubble.textContent = items.length >= 2 ? withoutListedDishes(answer, items) : answer;
+    appendItemCards(bubble, items);
   }
-  appendItemCards(bubble, data.cited_items || []);
-  if (shouldScroll) messageLog.scrollTop = messageLog.scrollHeight;
+}
+
+/** Puts a finished reply into a bubble. `answer` is authoritative, so it replaces the streamed
+ * preview. Scrolling is left to followReplyStart(). */
+function showReply(bubble, data) {
+  layOutBody(bubble, data);
 }
 
 /** Appends one message bubble. `text` is always set via textContent -- never HTML. */
-function appendMessage(role, text, { items = [], choices = null, scroll = true } = {}) {
+function appendMessage(
+  role,
+  text,
+  { items = [], choices = null, intro = null, outro = null, scroll = true } = {}
+) {
   const shouldScroll = scroll && isNearBottom();
 
   const bubble = document.createElement("div");
   bubble.className = `message message--${role}`;
-  if (choices) {
-    layOutChoices(bubble, choices);
-  } else {
-    bubble.textContent = text;
-  }
-  appendItemCards(bubble, items);
+  layOutBody(bubble, { answer: text, cited_items: items, choices, intro, outro });
 
   messageLog.appendChild(bubble);
   if (shouldScroll) scrollToBottom();
   return bubble;
 }
 
-/** Replaces a bubble's whole text (the streamed reply so far, or the final answer) and keeps the
- * view pinned to the bottom only if the guest hadn't scrolled away. Instant, not smooth: this
- * runs on every chunk, and queued smooth scrolls would lag behind the text. */
+/** Replaces a bubble's whole text (the streamed reply so far, or the final answer). Scrolling is
+ * left to followReplyStart(), which keeps the reply's start in view rather than its end. */
 function setBubbleText(bubble, text) {
-  const shouldScroll = isNearBottom();
   bubble.textContent = text;
-  if (shouldScroll) messageLog.scrollTop = messageLog.scrollHeight;
 }
 
 function showTypingIndicator() {
@@ -303,6 +581,7 @@ function renderIntro() {
 async function startNewChat() {
   const previousSessionId = sessionId;
   sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  stopFollowingReply();
   messageLog.textContent = "";
   sessionId = null;
 
@@ -319,15 +598,32 @@ async function startNewChat() {
   messageInput.focus();
 }
 
+/** How long a card click's reply waits behind the typing dots at least, so it follows the
+ * guest's bubble instead of appearing with it. */
+const CARD_REPLY_DELAY_MS = 700;
+
+/** Resolves once `time` (a Date.now() value) has passed -- at once if it already has. */
+function waitUntil(time) {
+  const remaining = time - Date.now();
+  if (remaining <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, remaining));
+}
+
 /** Sends one guest message. `browse` is set only by a click on a group or category card, and
- * tells the server exactly which one (rule R-15). A card click also passes
- * `showGuestBubble: false`: `text` is sent and saved to history, but not shown in the chat. */
-async function sendMessage(text, { browse = null, showGuestBubble = true } = {}) {
-  if (showGuestBubble) appendMessage("guest", text);
+ * tells the server exactly which one (rule R-15). A card click also passes `displayText`, the
+ * card's name: that is what the guest bubble shows, while `text` is sent and saved to history. */
+async function sendMessage(text, { browse = null, displayText = null } = {}) {
+  stopFollowingReply();
+  appendMessage("guest", displayText ?? text);
   showTypingIndicator();
-  // A card can be clicked from further up the log; with no guest bubble to follow, bring the
-  // guest down to where the reply is about to appear.
-  if (!showGuestBubble) scrollToBottom();
+  // Always, typed or clicked: the guest may be reading higher up (a card clicked from an earlier
+  // reply, or the start of a long answer), and should see their message and the typing dots
+  // at once, while the reply is being worked on -- not only once it arrives. When it does,
+  // followReplyStart() takes over and brings its start to the top.
+  scrollToBottom();
+  // A card's reply is often ready at once (a browse needs no model call); holding it back for a
+  // moment behind the typing dots lets the guest's bubble be seen first, then the answer.
+  const replyNotBefore = displayText !== null ? Date.now() + CARD_REPLY_DELAY_MS : 0;
   setBusy(true);
 
   inFlightController = new AbortController();
@@ -355,10 +651,12 @@ async function sendMessage(text, { browse = null, showGuestBubble = true } = {})
     messageLog.setAttribute("aria-busy", "true");
     let finished = false;
     for await (const { event, data } of readSseEvents(response)) {
+      if (!bubble) await waitUntil(replyNotBefore);
       if (event === "delta") {
         if (!bubble) {
           hideTypingIndicator();
-          bubble = appendMessage("assistant", "");
+          bubble = appendMessage("assistant", "", { scroll: false });
+          followReplyStart(bubble);
         }
         streamedText += data.text;
         setBubbleText(bubble, streamedText.trimStart());
@@ -370,10 +668,14 @@ async function sendMessage(text, { browse = null, showGuestBubble = true } = {})
         if (bubble) {
           showReply(bubble, data);
         } else {
-          appendMessage("assistant", data.answer, {
+          const reply = appendMessage("assistant", data.answer, {
             items: data.cited_items || [],
             choices: data.choices || null,
+            intro: data.intro || null,
+            outro: data.outro || null,
+            scroll: false,
           });
+          followReplyStart(reply);
         }
       } else if (event === "error") {
         finished = true;
@@ -383,7 +685,7 @@ async function sendMessage(text, { browse = null, showGuestBubble = true } = {})
     }
     if (!finished) {
       hideTypingIndicator();
-      appendMessage("error", "The reply was interrupted -- please try again.");
+      appendMessage("error", "The reply was interrupted. Please try again.");
     }
   } catch (err) {
     hideTypingIndicator();
@@ -392,7 +694,7 @@ async function sendMessage(text, { browse = null, showGuestBubble = true } = {})
     } else {
       appendMessage(
         "error",
-        "Couldn't reach the server -- please check your connection and try again."
+        "Couldn't reach the server. Please check your connection and try again."
       );
     }
   } finally {

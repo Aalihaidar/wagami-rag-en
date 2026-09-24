@@ -97,6 +97,10 @@ class AgentState(TypedDict, total=False):
     # The picture cards of a reply that lists groups or categories (rule C-23), or None. Written by
     # both turn-ending nodes every turn, for the same reason as `cited_items`.
     choices: Choices | None
+    # The reply cut around a category's item listing (rule C-25), or None when it isn't one or an
+    # item had no image. Written by both turn-ending nodes every turn, same reason as `choices`.
+    intro: str | None
+    outro: str | None
     usage: dict[str, Any]
 
 
@@ -206,9 +210,16 @@ def build_graph(
     config to persist `history` across turns for one guest session.
     """
 
-    def query_node(state: AgentState) -> dict[str, Any]:
+    def known_pick(state: AgentState) -> CardPick | None:
+        """This turn's card click, if the catalog knows its group/category (R-15)."""
         pick = state.get("browse")
         if pick and is_known_pick(category_index.catalog, pick["group"], pick["category"]):
+            return pick
+        return None
+
+    def query_node(state: AgentState) -> dict[str, Any]:
+        pick = known_pick(state)
+        if pick:
             # A card click names its group/category exactly: nothing to understand (R-15).
             understanding = picked_browse(state["question"], pick["group"], pick["category"])
             return {"understanding": understanding}
@@ -232,21 +243,28 @@ def build_graph(
         reply = direct.text
         # The whole reply at once: there is no generation stream to forward. The caller still
         # gets it as a delta, so /chat/stream and /chat behave the same on every route. A list of
-        # groups or categories streams only the sentence before its cards, which the final
-        # message keeps as its start, so the bullet list is never shown and then replaced.
-        get_stream_writer()({"delta": direct.choices["intro"] if direct.choices else reply})
+        # groups or categories, or a category's item listing, streams only the sentence before
+        # its cards, which the final message keeps as its start, so the bullet list is never
+        # shown and then replaced.
+        preview = direct.choices["intro"] if direct.choices else direct.intro or reply
+        get_stream_writer()({"delta": preview})
         understand_usage = understanding["usage"]
+        turn: HistoryTurn = {"question": state["question"], "answer": reply}
+        if known_pick(state):
+            turn["card_click"] = True  # free, so not counted towards the turn cap
         return {
             "answer": reply,
             "cited_slugs": [],
             "cited_items": direct.cards,
             "choices": direct.choices,
+            "intro": direct.intro,
+            "outro": direct.outro,
             "usage": {
                 "understand": understand_usage,
                 "generate": zero_usage(),
                 "total_tokens": understand_usage["total_tokens"],
             },
-            "history": [{"question": state["question"], "answer": reply}],
+            "history": [turn],
         }
 
     def retrieve_node(state: AgentState) -> dict[str, Any]:
@@ -308,6 +326,8 @@ def build_graph(
             "answer": reply,
             "cited_slugs": cited_slugs,
             "choices": None,
+            "intro": None,
+            "outro": None,
             "cited_items": cards_for_answer(
                 reply,
                 ranked=ranked,

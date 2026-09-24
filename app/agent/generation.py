@@ -83,7 +83,7 @@ def citable_slugs(ranked: list[RerankHit]) -> list[str]:
     ]
 
 
-MALFORMED_REPLY = "Sorry, I couldn't put that answer together properly -- could you ask me again?"
+MALFORMED_REPLY = "Sorry, I couldn't put that answer together properly. Could you ask me again?"
 
 
 def parse_generation_reply(text: str, candidate_slugs: list[str]) -> tuple[str, list[str]] | None:
@@ -201,7 +201,7 @@ SYSTEM_PROMPT_LEAK_WINDOW_WORDS = 8
 
 SAFE_FALLBACK_REPLY = (
     "I can't share that, but I'm happy to help with anything about our menu, dishes, "
-    "allergens, nutrition, or restaurant policies -- what would you like to know?"
+    "allergens, nutrition, or restaurant policies. What would you like to know?"
 )
 
 

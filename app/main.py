@@ -328,11 +328,14 @@ def _log_turn_timings(timings: dict[str, float]) -> None:
 @dataclass(frozen=True)
 class TurnReply:
     """What one /chat turn hands back: the text, the item cards under it, and, for a list of
-    groups or categories, that reply cut around its list with a card per name."""
+    groups or categories, that reply cut around its list with a card per name. `intro`/`outro`
+    are that same cut for a category's item listing (rule C-25), when every item got a card."""
 
     answer: str
     cited: list[GeneratedCitedItem] = field(default_factory=list)
     choices: GeneratedChoices | None = None
+    intro: str | None = None
+    outro: str | None = None
 
 
 def _cards_for_turn(final_state: dict[str, Any]) -> list[GeneratedCitedItem]:
@@ -356,7 +359,10 @@ def _precheck_reply(
     with timed("state_read"):
         snapshot = graph.get_state(config)
     history = (snapshot.values or {}).get("history", [])
-    if len(history) >= settings.max_conversation_turns:
+    # A group or category card click is answered from the catalog with no model call, so it
+    # costs nothing and is not counted (rule R-15); every other turn is.
+    turns = sum(1 for turn in history if not turn.get("card_click"))
+    if turns >= settings.max_conversation_turns:
         return CONVERSATION_LIMIT_REPLY
 
     with timed("cost_check"):
@@ -417,7 +423,11 @@ def _run_chat_turn(
     with timed("cost_record"):
         record_token_usage(redis_client, final_state["usage"]["total_tokens"])
     return TurnReply(
-        final_state["answer"], _cards_for_turn(final_state), _choices_for_turn(final_state)
+        final_state["answer"],
+        _cards_for_turn(final_state),
+        _choices_for_turn(final_state),
+        final_state.get("intro"),
+        final_state.get("outro"),
     )
 
 
@@ -456,16 +466,7 @@ def _build_chat_response(session_id: str, reply: TurnReply) -> ChatResponse:
         session_id=session_id,
         answer=reply.answer,
         cited_items=[
-            CitedItem(
-                id=item["id"],
-                slug=item["slug"],
-                name=item["name"],
-                description=item["description"],
-                ingredients=item["ingredients"],
-                price_gbp=item["price_gbp"],
-                image=_image_url(item["image"]),
-            )
-            for item in reply.cited
+            CitedItem(**{**item, "image": _image_url(item["image"])}) for item in reply.cited
         ],
         choices=Choices(
             intro=choices["intro"],
@@ -482,6 +483,8 @@ def _build_chat_response(session_id: str, reply: TurnReply) -> ChatResponse:
         )
         if choices
         else None,
+        intro=reply.intro,
+        outro=reply.outro,
     )
 
 
@@ -541,7 +544,11 @@ def _stream_chat_turn(
     yield (
         "done",
         TurnReply(
-            final_state["answer"], _cards_for_turn(final_state), _choices_for_turn(final_state)
+            final_state["answer"],
+            _cards_for_turn(final_state),
+            _choices_for_turn(final_state),
+            final_state.get("intro"),
+            final_state.get("outro"),
         ),
     )
 
