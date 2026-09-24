@@ -4,7 +4,7 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
-from app.agent.catalog import build_catalog
+from app.agent.catalog import NUTRITION_FIELDS, build_catalog
 from app.agent.graph import build_graph
 from app.agent.llm import LLMResponse, Usage
 from app.agent.prompts import GREETING_REPLY, OFF_TOPIC_REPLY
@@ -779,6 +779,17 @@ def test_listing_a_categorys_items_puts_their_cards_in_the_state() -> None:
             "ingredients": ["lychee"],
             "price_gbp": 8.0,
             "image": "drinks/cocktails/lychee.png",  # the photo in its category folder
+            "dietary_tags": [],
+            "allergens_contains": [],
+            "allergens_may_contain": [],
+            "category": "cocktails",
+            "category_path": ["drinks", "cocktails"],
+            "nutrition": {name: None for name in NUTRITION_FIELDS},
+            "is_gluten_free_listed": False,
+            "portion_value": None,
+            "portion_unit": None,
+            "servings": None,
+            "abv_percent": None,
         }
     ]
     assert len(client.calls) == 1  # still only the understanding call
@@ -813,6 +824,29 @@ def test_a_category_card_click_lists_its_items_with_no_model_call() -> None:
     assert [c["name"] for c in final["cited_items"]] == ["Lychee Sangria"]
     assert client.calls == []
     assert final["usage"]["total_tokens"] == 0
+
+
+def test_only_a_known_card_click_is_saved_as_a_card_click_turn() -> None:
+    """The flag that keeps a free card click out of the conversation-turn cap is set on the
+    click's history turn, and not on a typed turn or a click the menu no longer has."""
+    client = FakeGroqClient(
+        understanding_for(intent="menu_browse", browse_category="cocktails"), "NOT CALLED"
+    )
+    graph = card_click_graph(client)
+
+    clicked = graph.invoke(
+        {"question": "Show me drinks", "browse": {"group": "drinks", "category": None}}
+    )
+    stale = graph.invoke(
+        {"question": "Show me pizza in drinks", "browse": {"group": "drinks", "category": "pizza"}}
+    )
+    typed = graph.invoke({"question": "cocktails", "browse": None})
+
+    assert clicked["history"] == [
+        {"question": "Show me drinks", "answer": clicked["answer"], "card_click": True}
+    ]
+    assert "card_click" not in stale["history"][0]
+    assert "card_click" not in typed["history"][0]
 
 
 def test_a_group_card_click_lists_its_categories_with_no_model_call() -> None:

@@ -35,6 +35,21 @@ class CitedItem(BaseModel):
     ingredients: list[str] = Field(default_factory=list)
     price_gbp: float | None = None
     image: str
+    # Only shown by the chat page in the single-dish detail view (rule C-26); a listing's or a
+    # multi-dish answer's gallery card ignores these, same as before.
+    dietary_tags: list[str] = Field(default_factory=list)
+    allergens_contains: list[str] = Field(default_factory=list)
+    allergens_may_contain: list[str] = Field(default_factory=list)
+    # The rest of the dish's row, also only shown in the single-dish detail view (C-26).
+    category: str | None = None
+    category_path: list[str] = Field(default_factory=list)
+    # Per serving, keyed by field name (kcal, protein_g, carbs_g, ...).
+    nutrition: dict[str, float | None] = Field(default_factory=dict)
+    is_gluten_free_listed: bool = False
+    portion_value: float | None = None
+    portion_unit: str | None = None
+    servings: str | None = None
+    abv_percent: float | None = None
 
 
 class ChoiceCard(BaseModel):
@@ -57,11 +72,17 @@ class Choices(BaseModel):
 
 class ChatResponse(BaseModel):
     session_id: str
-    # The whole reply as text. For a list of groups or categories that includes the bullet list;
-    # a client that shows `choices` instead lays out intro, cards and outro in its place.
+    # The whole reply as text. For a list of groups or categories, or of a category's items, that
+    # includes the bullet list; a client that shows `choices` (groups/categories) or `intro`/
+    # `outro` (a category's items, alongside `cited_items`) instead lays those out in its place.
     answer: str
     cited_items: list[CitedItem]
     choices: Choices | None = None
+    # The reply cut around a category's item listing (rule C-25): the opening sentence and the
+    # closing question, with `cited_items` shown as cards between them instead of a bullet list.
+    # None when the reply isn't a full item listing (an item with no image keeps the bullet list).
+    intro: str | None = None
+    outro: str | None = None
 
 
 class SessionResponse(BaseModel):

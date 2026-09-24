@@ -8,7 +8,7 @@ from app.agent.browse import (
     direct_reply,
     is_known_pick,
 )
-from app.agent.catalog import MenuCatalog, build_catalog
+from app.agent.catalog import NUTRITION_FIELDS, MenuCatalog, build_catalog
 from app.agent.prompts import GREETING_REPLY, OFF_TOPIC_REPLY
 
 
@@ -159,6 +159,12 @@ def detailed() -> MenuCatalog:
                 ingredients=["sweeten with cane syrup", "milk", "coffee"],
                 price_gbp=2.5,
                 image="iced-latte.png",
+                kcal=120,
+                sugars_g=9.5,
+                abv_percent=0.0,
+                portion_value=1.0,
+                portion_unit="ea",
+                servings="1",
             ),
             row(
                 "Double Espresso",
@@ -202,7 +208,45 @@ def test_a_category_listing_returns_a_card_for_each_item_that_has_an_image(
         "ingredients": ["sweeten with cane syrup", "milk", "coffee"],
         "price_gbp": 2.5,
         "image": "drinks/coffee-tea/iced-latte.png",  # its folder in the image tree
+        "dietary_tags": [],
+        "allergens_contains": [],
+        "allergens_may_contain": [],
+        "category": "coffee + tea",
+        "category_path": ["drinks", "coffee + tea"],
+        "nutrition": {**{name: None for name in NUTRITION_FIELDS}, "kcal": 120.0, "sugars_g": 9.5},
+        "is_gluten_free_listed": False,
+        "portion_value": 1.0,
+        "portion_unit": "ea",
+        "servings": "1",
+        "abv_percent": 0.0,
     }
+
+
+def test_a_category_listing_is_cut_around_its_list_when_every_item_has_a_card(
+    detailed: MenuCatalog,
+) -> None:
+    """ "sides/gyoza" has a single item and it has an image, so every item got a card: the reply
+    should be cut into intro/outro (rule R-14/C-25), like a groups/categories listing."""
+    answer = browse_answer(detailed, "sides", "gyoza")
+
+    assert [c["name"] for c in answer.cards] == ["Gyoza"]
+    assert answer.intro == "Here is everything in gyoza (sides):"
+    assert answer.outro == "Would you like to know more about any of these?"
+    # The full bullet-list text is still there, e.g. for history.
+    assert "- Gyoza: price: £6.00." in answer.text
+
+
+def test_a_category_listing_keeps_its_bullet_list_when_an_item_has_no_card(
+    detailed: MenuCatalog,
+) -> None:
+    """ "drinks/coffee + tea" has Plain Water, which has no image and so no card: cutting the
+    bullet list away would drop it from the reply entirely, so it must not be cut."""
+    answer = browse_answer(detailed, "drinks", "coffee + tea")
+
+    assert [c["name"] for c in answer.cards] == ["Double Espresso", "Iced Latte"]
+    assert answer.intro is None
+    assert answer.outro is None
+    assert "\n- Plain Water\n" in answer.text
 
 
 def test_choosing_a_group_with_one_category_also_lists_items_with_cards(
@@ -227,6 +271,7 @@ def test_choosing_a_group_with_one_category_also_lists_items_with_cards(
     assert answer.text.startswith("Here is everything in extras:")
     assert [c["name"] for c in answer.cards] == ["Chillies"]
     assert answer.cards[0]["image"] == "extras/c.png"  # a one-category group has no subfolder
+    assert answer.intro == "Here is everything in extras:"  # its one item has a card too
 
 
 @pytest.mark.parametrize(
@@ -236,7 +281,12 @@ def test_choosing_a_group_with_one_category_also_lists_items_with_cards(
 def test_lists_of_groups_and_categories_and_questions_carry_no_cards(
     detailed: MenuCatalog, group: str | None, category: str | None
 ) -> None:
-    assert browse_answer(detailed, group, category).cards == []
+    answer = browse_answer(detailed, group, category)
+
+    assert answer.cards == []
+    # intro/outro (R-14/C-25) are only for a category's item listing; these use `choices` instead.
+    assert answer.intro is None
+    assert answer.outro is None
 
 
 def test_the_unaltered_text_helpers_agree_with_the_answer(detailed: MenuCatalog) -> None:

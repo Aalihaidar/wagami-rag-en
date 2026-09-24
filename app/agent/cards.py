@@ -40,9 +40,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TypedDict
 
-from app.agent.catalog import MenuItem, mentioned_names, normalise
+from app.agent.catalog import NUTRITION_FIELDS, MenuItem, mentioned_names, normalise
 from app.agent.choice_images import dish_image_path
-from app.retrieval import MenuRow, RerankHit, plist, pnum, pstr
+from app.retrieval import MenuRow, RerankHit, pbool, plist, pnum, pstr
 
 
 class CitedItem(TypedDict):
@@ -53,6 +53,21 @@ class CitedItem(TypedDict):
     ingredients: list[str]
     price_gbp: float | None
     image: str
+    # Present on every card, but the chat page only displays these in the single-dish detail
+    # view (rule C-26) -- a listing's or a multi-dish answer's gallery card still shows just
+    # name/description/ingredients/price, same as before.
+    dietary_tags: list[str]
+    allergens_contains: list[str]
+    allergens_may_contain: list[str]
+    category: str | None
+    category_path: list[str]
+    # Per serving, keyed by field name (kcal, protein_g, ...) in catalog.NUTRITION_FIELDS order.
+    nutrition: dict[str, float | None]
+    is_gluten_free_listed: bool
+    portion_value: float | None
+    portion_unit: str | None
+    servings: str | None
+    abv_percent: float | None
 
 
 class ChoiceCard(TypedDict):
@@ -90,24 +105,39 @@ def card_for_item(item: MenuItem) -> CitedItem | None:
         "ingredients": list(item.ingredients),
         "price_gbp": item.price_gbp,
         "image": item.image,
+        "dietary_tags": list(item.dietary_tags),
+        "allergens_contains": list(item.allergens_contains),
+        "allergens_may_contain": list(item.allergens_may_contain),
+        "category": item.category,
+        "category_path": list(item.category_path),
+        "nutrition": dict(item.nutrition),
+        "is_gluten_free_listed": item.is_gluten_free_listed,
+        "portion_value": item.portion_value,
+        "portion_unit": item.portion_unit,
+        "servings": item.servings,
+        "abv_percent": item.abv_percent,
     }
 
 
 def card_for_row(row: MenuRow) -> CitedItem | None:
     """The card for a retrieved row, or None for an FAQ row or a dish with no image.
 
-    The card is deliberately a glance-level summary: name, description, ingredients, and price
-    only. Dietary tags, allergens, and nutrition are intentionally NOT carried through here --
-    they're still real CONTEXT fields (format_row()) that the model sees and can state in the
-    answer text itself (see GENERATION_SYSTEM_PROMPT's rule on this), just not duplicated onto
-    the card. `name` also doubles as the image's `alt` text (Section B/4's accessibility
-    requirement). `description` is `None` on the 17/162 corpus rows that genuinely have none
-    (plain drinks, mostly); `ingredients` is a derived, not source-verified field -- both are
-    omitted by the frontend rather than shown as a placeholder when empty.
+    Carries the dish's whole guest-facing row -- name, description, ingredients, price, dietary
+    tags, allergens, nutrition, category, portion, ABV -- everything the single-dish detail view
+    (rule C-26) shows as structured facts, which is why the model keeps a one-dish answer short
+    (G-11). A listing's or a multi-dish answer's gallery card still only *displays* name,
+    description, ingredients and price (the chat page's own choice, not a narrower card shape);
+    for those the model states dietary tags, allergens and nutrition in the answer text (G-07).
+    `name` also doubles as the image's `alt` text (Section B/4's accessibility requirement).
+    `description` is `None` on the 17/162 corpus rows that genuinely have none (plain drinks,
+    mostly); `ingredients` is a derived, not source-verified field -- both are omitted by the
+    frontend rather than shown as a placeholder when empty.
     """
     image = pstr(row, "image")
     if pstr(row, "item_type") != "menu_item" or not image:
         return None
+    path = [p for p in plist(row, "category_path") if isinstance(p, str)]
+    servings = row["properties"].get("servings")
     return {
         "id": row["uuid"],
         "slug": pstr(row, "slug"),
@@ -115,9 +145,18 @@ def card_for_row(row: MenuRow) -> CitedItem | None:
         "description": pstr(row, "description") or None,
         "ingredients": plist(row, "ingredients"),
         "price_gbp": pnum(row, "price_gbp"),
-        "image": dish_image_path(
-            [p for p in plist(row, "category_path") if isinstance(p, str)], image
-        ),
+        "image": dish_image_path(path, image),
+        "dietary_tags": plist(row, "dietary_tags"),
+        "allergens_contains": plist(row, "allergens_contains"),
+        "allergens_may_contain": plist(row, "allergens_may_contain"),
+        "category": pstr(row, "category") or None,
+        "category_path": path,
+        "nutrition": {name: pnum(row, name) for name in NUTRITION_FIELDS},
+        "is_gluten_free_listed": pbool(row, "is_gluten_free_listed"),
+        "portion_value": pnum(row, "portion_value"),
+        "portion_unit": pstr(row, "portion_unit") or None,
+        "servings": str(servings) if servings is not None and servings != "" else None,
+        "abv_percent": pnum(row, "abv_percent"),
     }
 
 

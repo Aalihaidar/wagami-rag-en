@@ -41,6 +41,18 @@ FIELDS = [
     "price_gbp",
     "kcal",
     "protein_g",
+    # the rest of the nutrition and portion fields: not in the CONTEXT rows (format_row()), only
+    # on the single-dish detail view's card (rule C-26)
+    "carbs_g",
+    "sugars_g",
+    "fat_g",
+    "sat_fat_g",
+    "fibre_g",
+    "sodium_g",
+    "salt_g",
+    "portion_value",
+    "portion_unit",
+    "servings",
     "abv_percent",
     "dietary_tags",
     "allergens_contains",
