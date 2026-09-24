@@ -22,7 +22,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from app.agent.browse import DIRECT_INTENTS, direct_answer
+from app.agent.browse import DIRECT_INTENTS, direct_answer, is_known_pick
 from app.agent.cards import Choices, CitedItem, cards_for_answer
 from app.agent.generation import (
     GENERATION_REASONING_EFFORT,
@@ -46,11 +46,23 @@ from app.agent.prompts import (
     GENERATION_SYSTEM_PROMPT,
     SCOPE_AND_SAFETY,
 )
-from app.agent.understanding import CategoryIndex, UnderstandingResult, understand_query
+from app.agent.understanding import (
+    CategoryIndex,
+    UnderstandingResult,
+    picked_browse,
+    understand_query,
+)
 from app.retrieval import RetrievalTool, SearchResult
 from app.timing import timed
 
 logger = logging.getLogger("app.agent.graph")
+
+
+class CardPick(TypedDict):
+    """A clicked group or category card (rule R-15); `category` is None for a group's card."""
+
+    group: str
+    category: str | None
 
 
 class AgentState(TypedDict, total=False):
@@ -63,6 +75,9 @@ class AgentState(TypedDict, total=False):
     """
 
     question: Required[str]
+    # The group/category card the guest clicked this turn ({"group", "category"}), or None for
+    # typed text (rule R-15). Written with every turn's input, so a click never carries over.
+    browse: CardPick | None
     # Reduced with operator.add (list concatenation) across checkpointed turns: each
     # answer_node call contributes a one-item list, appended to what's already persisted.
     history: Annotated[list[HistoryTurn], operator.add]
@@ -192,6 +207,11 @@ def build_graph(
     """
 
     def query_node(state: AgentState) -> dict[str, Any]:
+        pick = state.get("browse")
+        if pick and is_known_pick(category_index.catalog, pick["group"], pick["category"]):
+            # A card click names its group/category exactly: nothing to understand (R-15).
+            understanding = picked_browse(state["question"], pick["group"], pick["category"])
+            return {"understanding": understanding}
         history_context = build_history_context(state.get("history", []))
         with timed("understand"):
             understanding = understand_query(

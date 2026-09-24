@@ -619,8 +619,8 @@ MENU_CHOICES = {
     "intro": "Our menu is organised into these categories:",
     "outro": "What kind of these would you like to see?",
     "cards": [
-        {"name": "drinks", "image": "drinks/cover.png"},
-        {"name": "sides", "image": "sides/cover.png"},
+        {"name": "drinks", "image": "drinks/cover.png", "group": "drinks", "category": None},
+        {"name": "sides", "image": "sides/cover.png", "group": "sides", "category": None},
     ],
 }
 MENU_LIST_TEXT = (
@@ -695,3 +695,41 @@ def test_chat_stream_done_event_carries_the_choice_cards() -> None:
     assert MENU_LIST_TEXT.startswith(events[0][1]["text"])  # the delta is a prefix of the answer
     assert events[-1][1]["choices"]["outro"] == "What kind of these would you like to see?"
     assert [c["name"] for c in events[-1][1]["choices"]["cards"]] == ["drinks", "sides"]
+
+
+# --- a click on a group or category card (rule R-15) ---------------------------------------------
+
+
+def test_chat_passes_a_clicked_card_to_the_graph_and_none_for_typed_text() -> None:
+    fake_graph = FakeGraph({"answer": "ok", "cited_items": [], "usage": {"total_tokens": 0}})
+    with _client_with(fake_graph) as client:
+        client.post(
+            "/chat",
+            json={
+                "session_id": "s1",
+                "message": "Show me lighter bites in sides",
+                "browse": {"group": "sides", "category": "lighter bites"},
+            },
+        )
+        client.post("/chat", json={"session_id": "s1", "message": "hello"})
+
+    assert fake_graph.invoke_calls[0]["input"] == {
+        "question": "Show me lighter bites in sides",
+        "browse": {"group": "sides", "category": "lighter bites"},
+    }
+    # always written, so the previous turn's click never carries over in the saved state
+    assert fake_graph.invoke_calls[1]["input"] == {"question": "hello", "browse": None}
+
+
+def test_chat_rejects_a_card_click_with_unknown_fields() -> None:
+    with _client_with(FakeGraph({"answer": "ok"})) as client:
+        response = client.post(
+            "/chat",
+            json={
+                "session_id": "s1",
+                "message": "Show me sides",
+                "browse": {"group": "sides", "slug": "x"},
+            },
+        )
+
+    assert response.status_code == 422
