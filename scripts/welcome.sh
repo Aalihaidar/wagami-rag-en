@@ -12,7 +12,9 @@ fi
 echo ""
 echo "wagami-rag-en dev container"
 echo "=============================="
-echo "Phase 1: data + Weaviate only -- no app/, no production yet."
+echo "Dev server: http://localhost:8000  (starts with the container, reloads when app/ changes)"
+echo "  logs:    tail -f /tmp/dev-server.log"
+echo "  restart: pkill -f scripts/dev_server.py     # dev-start.sh brings it back in ~10s"
 echo ""
 
 if [ ! -f /workspace/.venv/bin/python ]; then

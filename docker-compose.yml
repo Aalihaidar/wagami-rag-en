@@ -15,7 +15,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    command: sleep infinity
+    # Starts the dev server (with hot reload) as soon as the container starts and keeps the
+    # container up even if the server fails to start; see scripts/dev-start.sh.
+    command: ["bash", "/workspace/scripts/dev-start.sh"]
+    init: true
 
   redis:
     image: redis/redis-stack-server:7.4.0-v8
