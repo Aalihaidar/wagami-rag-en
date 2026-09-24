@@ -526,3 +526,116 @@ def test_the_prompt_tells_the_model_to_prefer_menu_over_off_topic_when_unsure() 
 
     assert "Use it only when the message is clearly unrelated" in prompt
     assert 'a wrong "off_topic" turns a real guest away' in prompt
+
+
+# ---- resolved_question: the message with "it" filled in (rule U-22, guarantee C-22) --------------
+
+
+def resolved_json(**overrides: Any) -> str:
+    import json
+
+    base: dict[str, Any] = {
+        "intent": "menu",
+        "browse_group": "none",
+        "browse_category": "none",
+        "dietary": "none",
+        "price_max_gbp": None,
+        "allergens_exclude": [],
+        "search_query": "chicken katsu curry",
+        "resolved_question": "How many calories does the chicken katsu curry have?",
+        "category_hint": [],
+        "gluten_free_only": False,
+        "kcal_max": None,
+        "protein_min_g": None,
+        "alcohol_free": False,
+    }
+    return json.dumps({**base, **overrides})
+
+
+def parsed(text: str, question: str = "how many calories does it have?") -> Any:
+    usage: Usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    return parse_understanding(text, usage, question, make_category_index())
+
+
+def test_the_resolved_question_is_returned_as_the_model_wrote_it() -> None:
+    result = parsed(resolved_json())
+
+    assert result["resolved_question"] == "How many calories does the chicken katsu curry have?"
+
+
+def test_the_resolved_question_is_trimmed() -> None:
+    assert (
+        parsed(resolved_json(resolved_question="  Is the ramen vegan?\n"))["resolved_question"]
+        == "Is the ramen vegan?"
+    )
+
+
+@pytest.mark.parametrize("bad", ["", "   ", None, 7, ["a"], "x" * 501])
+def test_a_missing_blank_mistyped_or_oversized_resolved_question_becomes_the_guests_message(
+    bad: Any,
+) -> None:
+    result = parsed(resolved_json(resolved_question=bad), question="the guest's own words")
+
+    assert result["resolved_question"] == "the guest's own words"
+
+
+def test_a_reply_without_the_field_falls_back_to_the_guests_message() -> None:
+    import json
+
+    payload = json.loads(resolved_json())
+    del payload["resolved_question"]
+
+    assert (
+        parsed(json.dumps(payload), question="a ramen dish")["resolved_question"] == "a ramen dish"
+    )
+
+
+def test_the_resolved_question_never_changes_a_filter_or_the_route() -> None:
+    """C-22: a rewrite that mentions a diet, an allergy, a price or a calorie limit the guest did
+    not state cannot reach the filters, which come from the other fields."""
+    rewrite = "Which vegan, nut-free dish under £5 and under 300 calories is the chicken katsu?"
+
+    result = parsed(resolved_json(resolved_question=rewrite))
+
+    assert result["resolved_question"] == rewrite
+    assert result["dietary"] is None
+    assert result["allergens_exclude"] == []
+    assert result["price_max_gbp"] is None
+    assert result["kcal_max"] is None
+    assert result["search_query"] == "chicken katsu curry"
+
+
+def test_understand_query_carries_the_resolved_question_and_still_sends_the_history() -> None:
+    client = FakeGroqClient(resolved_json())
+
+    result = understand_query(
+        "how many calories does it have?",
+        category_index=make_category_index(),
+        groq_client=client,  # type: ignore[arg-type]
+        model="m",
+        context=SAMPLE_HISTORY_CONTEXT,
+    )
+
+    assert result["resolved_question"] == "How many calories does the chicken katsu curry have?"
+    assert client.calls[0]["user_prompt"].endswith(
+        "Guest's new message: how many calories does it have?"
+    )
+    assert "resolved_question" in client.calls[0]["response_schema"]["required"]
+
+
+def test_without_a_model_the_resolved_question_is_the_guests_message() -> None:
+    result = understand_query(
+        "how many calories does it have?",
+        category_index=make_category_index(),
+        groq_client=None,
+        model="m",
+    )
+
+    assert result["resolved_question"] == "how many calories does it have?"
+
+
+def test_the_understand_prompt_tells_the_model_how_to_resolve_references() -> None:
+    prompt = build_understand_system_prompt(make_category_index())
+
+    assert "- resolved_question:" in prompt
+    assert "never add a price, allergy, diet or other requirement" in prompt

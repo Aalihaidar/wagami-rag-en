@@ -14,8 +14,8 @@ why this specific notebook is the verified porting source).
 
 import json
 import re
-from typing import TypedDict
 
+from app.agent.catalog import normalise
 from app.agent.prompts import FAQ_TONE, MENU_TONE
 from app.retrieval import ExcludedTopMatch, MenuRow, RerankHit, pbool, plist, pnum, pstr
 
@@ -114,61 +114,21 @@ def parse_generation_reply(text: str, candidate_slugs: list[str]) -> tuple[str, 
     return None
 
 
-class CitedItem(TypedDict):
-    id: str
-    slug: str
-    name: str
-    description: str | None
-    ingredients: list[str]
-    price_gbp: float | None
-    image: str
+_CITED_SLUGS_FIELD = re.compile(r'"cited_slugs"\s*:\s*\[([^\]]*)')
 
 
-def cited_items_from_ranked(ranked: list[RerankHit], cited_slugs: list[str]) -> list[CitedItem]:
-    """Menu items from CONTEXT worth showing the guest a card for.
+def salvage_cited_slugs(text: str, candidate_slugs: list[str]) -> list[str]:
+    """The `cited_slugs` a reply managed to write before it stopped being valid JSON.
 
-    Restricted to rows the generation call's own structured `cited_slugs` output names (see
-    CITATION_OUTPUT_INSTRUCTIONS / build_generation_response_schema()) -- the model reports,
-    alongside its free-text answer, exactly which CONTEXT menu items that answer discusses or
-    refers to, including an implicit reference (a pronoun, a shortened name) back to a dish
-    already named. This replaces an earlier first cut that scanned the answer text for an
-    exact, literal name match, which under-showed on any such reference and had no way to
-    catch one at all.
-
-    The card is deliberately a glance-level summary: name, description, ingredients, and
-    price only. Dietary tags, allergens, and nutrition are intentionally NOT carried through
-    here -- they're still real CONTEXT fields (format_row()) that the model sees and can
-    state in the answer text itself (see GENERATION_SYSTEM_PROMPT's rule on this), just not
-    duplicated onto the card. `name` also doubles as the image's `alt` text (Section B/4's
-    accessibility requirement). `description` is `None` on the 17/162 corpus rows that
-    genuinely have none (plain drinks, mostly); `ingredients` is a derived, not
-    source-verified field -- both are omitted by the frontend rather than shown as a
-    placeholder when empty.
+    A reply that is cut off, or has a stray character in it, fails parse_generation_reply() as a
+    whole, but a citation that was already written is still the model's own report of which dishes
+    its answer is about, so it is kept (limited to `candidate_slugs`, like a parsed one).
     """
-    cited = set(cited_slugs)
-    items: list[CitedItem] = []
-    for hit in ranked:
-        row = hit["row"]
-        if pstr(row, "item_type") != "menu_item":
-            continue
-        image = pstr(row, "image")
-        if not image:
-            continue
-        slug = pstr(row, "slug")
-        if slug not in cited:
-            continue
-        items.append(
-            {
-                "id": row["uuid"],
-                "slug": slug,
-                "name": pstr(row, "name"),
-                "description": pstr(row, "description") or None,
-                "ingredients": plist(row, "ingredients"),
-                "price_gbp": pnum(row, "price_gbp"),
-                "image": image,
-            }
-        )
-    return items
+    field = _CITED_SLUGS_FIELD.search(text)
+    if field is None:
+        return []
+    written = re.findall(r'"([^"]+)"', field.group(1))
+    return [slug for slug in dict.fromkeys(written) if slug in candidate_slugs]
 
 
 def build_user_prompt(
@@ -176,6 +136,7 @@ def build_user_prompt(
     context: str,
     relaxed_fields: list[str],
     excluded_top_match: ExcludedTopMatch | None = None,
+    resolved_question: str | None = None,
 ) -> str:
     """The full user-turn text sent to the LLM alongside GENERATION_SYSTEM_PROMPT.
 
@@ -193,9 +154,23 @@ def build_user_prompt(
     dietary hard-filter or the allergen exclude -- that has to reach the model explicitly too,
     otherwise nothing stops it from answering as if a different CONTEXT row is the dish the
     guest actually named.
+
+    Generation is never shown the conversation, so a follow-up ("how many calories does it
+    have?") reaches it with nothing to say what "it" is, and its rule against guessing makes it
+    decline. `resolved_question` (rule U-22, from the understanding call, which did see the
+    conversation) is the same message with that filled in. When it differs from the message it
+    goes in as a second line of the same <guest_message> block (rule P-05), so it is still guest
+    text as far as the system prompt's data-not-instructions rule goes; when it doesn't, the
+    prompt is exactly what a first turn has always been.
     """
+    message = question
+    if resolved_question and normalise(resolved_question) != normalise(question):
+        message = (
+            f"Guest's message: {question}\n"
+            f"Read together with the earlier conversation, this means: {resolved_question}"
+        )
     text = (
-        f"<guest_message>\n{question}\n</guest_message>\n\n"
+        f"<guest_message>\n{message}\n</guest_message>\n\n"
         f"<retrieved_context>\n{context}\n</retrieved_context>"
     )
     if relaxed_fields:

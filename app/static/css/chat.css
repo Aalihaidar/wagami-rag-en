@@ -304,6 +304,79 @@ body {
   white-space: normal;
 }
 
+/* A list of groups or categories, laid out between the reply's opening sentence and its closing
+   question in place of the bullet list. */
+.message__part {
+  white-space: pre-wrap;
+}
+
+.choice-cards {
+  list-style: none;
+  margin: 10px 0;
+  padding: 0;
+  display: grid;
+  /* min(100%, ...) so a single column can never be wider than the bubble it sits in. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 9rem), 1fr));
+  gap: 10px;
+}
+
+.choice-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* The pictures sit inside the card with a margin of surface colour all round, not flush with
+     its edge. */
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+/* The group's or category's cover picture, shown whole at its own shape (the covers are
+   square) -- no fixed frame, so nothing is cropped. Same zoom-on-click affordance as an item
+   card's photo. flex-shrink: 0 stops the card's column from squashing it. */
+.choice-card__picture-button {
+  display: block;
+  flex-shrink: 0;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: var(--border);
+  cursor: zoom-in;
+  /* Follows the card's own corner (radius minus the padding), so the frame reads as inset. */
+  border-radius: calc(var(--radius) - 8px);
+  overflow: hidden;
+}
+
+.choice-card__picture {
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  display: block;
+  transition: transform 0.2s ease;
+}
+
+.choice-card__picture-button:hover .choice-card__picture,
+.choice-card__picture-button:focus-visible .choice-card__picture {
+  transform: scale(1.05);
+}
+
+/* The name sits at the bottom, centred. `margin-top: auto` keeps it on the card's bottom edge
+   when a neighbour in the same row is taller (its name wraps to two lines), and a card with no
+   pictures is just its name. */
+.choice-card__name {
+  margin: auto 0 0;
+  padding: 0 4px 2px;
+  text-align: center;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text);
+  white-space: normal;
+}
+
 .typing-indicator {
   align-self: flex-start;
   display: inline-flex;
@@ -509,11 +582,12 @@ body {
     --gutter: 12px;
   }
 
-  .message:has(> .item-cards) {
+  .message:has(> .item-cards, > .choice-cards) {
     max-width: calc(100% - var(--avatar-offset));
   }
 
-  .item-cards {
+  .item-cards,
+  .choice-cards {
     grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr));
   }
 }
@@ -595,7 +669,8 @@ body {
     animation-delay: 0s;
   }
 
-  .item-card__image {
+  .item-card__image,
+  .choice-card__picture {
     transition: none;
   }
 }

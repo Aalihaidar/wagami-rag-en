@@ -778,7 +778,7 @@ def test_listing_a_categorys_items_puts_their_cards_in_the_state() -> None:
             "description": "fruity",
             "ingredients": ["lychee"],
             "price_gbp": 8.0,
-            "image": "lychee.png",
+            "image": "drinks/cocktails/lychee.png",  # the photo in its category folder
         }
     ]
     assert len(client.calls) == 1  # still only the understanding call
@@ -788,3 +788,371 @@ def test_a_list_of_groups_carries_no_cards() -> None:
     graph, _ = direct_route_graph(understanding_for(intent="menu_browse"))
 
     assert graph.invoke({"question": "what is your menu?"})["cited_items"] == []
+
+
+# ---- item cards belong to the current answer, and to nothing that came before it -----------------
+
+
+class ScriptedGroqClient(StreamsViaCall):
+    """Answers a conversation turn by turn: each understanding call and each generation call
+    takes the next canned reply, in order."""
+
+    def __init__(self, understandings: list[str], generations: list[str]) -> None:
+        self._understandings = list(understandings)
+        self._generations = list(generations)
+        self.calls: list[dict[str, Any]] = []
+
+    def call(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        response_schema: dict | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        usage: Usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        self.calls.append(
+            {"system_prompt": system_prompt, "user_prompt": user_prompt, "schema": response_schema}
+        )
+        queue = self._understandings if response_schema is not None else self._generations
+        return {"text": queue.pop(0), "usage": usage}
+
+
+def carded_conversation(
+    monkeypatch: Any, understandings: list[str], generations: list[str], hits: list[Any]
+) -> tuple[Any, RunnableConfig]:
+    """A checkpointed graph over the carded catalog whose search returns `hits`, plus the config
+    of one session -- so a test can send several turns and look at each turn's cards."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    tool = RetrievalTool(kb=FakeKB(hits), cohere_api_key="")  # type: ignore[arg-type]
+    monkeypatch.setattr(tool, "rerank", _no_rerank)
+    graph = build_graph(
+        retrieval_tool=tool,
+        category_index=make_carded_index(),
+        groq_client=ScriptedGroqClient(understandings, generations),  # type: ignore[arg-type]
+        understand_model="m",
+        generation_model="m",
+        checkpointer=InMemorySaver(),
+    )
+    return graph, {"configurable": {"thread_id": "session"}}
+
+
+def cited(*slugs: str, answer: str) -> str:
+    return json.dumps({"answer": answer, "cited_slugs": list(slugs)})
+
+
+def card_slugs(state: dict[str, Any]) -> list[str]:
+    return [card["slug"] for card in state["cited_items"]]
+
+
+def test_a_search_answer_after_a_listing_shows_its_own_card_not_the_listings(
+    monkeypatch: Any,
+) -> None:
+    graph, config = carded_conversation(
+        monkeypatch,
+        [
+            understanding_for(intent="menu_browse", browse_category="cocktails"),
+            understanding_for(search_query="flat white"),
+        ],
+        [cited("flat-white", answer="The Flat White is £9.50.")],
+        [make_obj("flat white", image="flat-white.png")],
+    )
+
+    listing = graph.invoke({"question": "cocktails"}, config=config)
+    answer = graph.invoke({"question": "how much is the flat white"}, config=config)
+
+    assert card_slugs(listing) == ["lychee-sangria"]
+    assert card_slugs(answer) == ["flat-white"]  # not the cocktails listed one turn earlier
+
+
+def test_a_search_answer_after_a_greeting_still_gets_its_card(monkeypatch: Any) -> None:
+    graph, config = carded_conversation(
+        monkeypatch,
+        [understanding_for(intent="greeting"), understanding_for(search_query="flat white")],
+        [cited("flat-white", answer="The Flat White is £9.50.")],
+        [make_obj("flat white", image="flat-white.png")],
+    )
+
+    assert card_slugs(graph.invoke({"question": "hi"}, config=config)) == []
+    answer = graph.invoke({"question": "how much is the flat white"}, config=config)
+
+    assert card_slugs(answer) == ["flat-white"]  # a greeting must not switch cards off for good
+
+
+def test_each_search_answer_shows_only_the_dishes_it_talks_about(monkeypatch: Any) -> None:
+    graph, config = carded_conversation(
+        monkeypatch,
+        [understanding_for(search_query="sangria"), understanding_for(search_query="flat white")],
+        [
+            cited("lychee-sangria", answer="The Lychee Sangria is £9.50."),
+            cited("flat-white", answer="The Flat White is £9.50."),
+        ],
+        [
+            make_obj("lychee sangria", image="lychee.png"),
+            make_obj("flat white", image="flat-white.png"),
+        ],
+    )
+
+    first = graph.invoke({"question": "the sangria"}, config=config)
+    second = graph.invoke({"question": "and the flat white"}, config=config)
+
+    assert card_slugs(first) == ["lychee-sangria"]
+    assert card_slugs(second) == ["flat-white"]
+
+
+def test_a_greeting_after_a_listing_carries_no_cards() -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    client = ScriptedGroqClient(
+        [
+            understanding_for(intent="menu_browse", browse_category="cocktails"),
+            understanding_for(intent="greeting"),
+        ],
+        [],
+    )
+    graph = build_graph(
+        retrieval_tool=RetrievalTool(kb=ExplodingKB(), cohere_api_key=""),  # type: ignore[arg-type]
+        category_index=make_carded_index(),
+        groq_client=client,  # type: ignore[arg-type]
+        understand_model="m",
+        generation_model="m",
+        checkpointer=InMemorySaver(),
+    )
+    config: RunnableConfig = {"configurable": {"thread_id": "s"}}
+
+    assert card_slugs(graph.invoke({"question": "cocktails"}, config=config)) == ["lychee-sangria"]
+    assert card_slugs(graph.invoke({"question": "thanks!"}, config=config)) == []
+
+
+def test_a_dish_the_answer_names_gets_its_card_even_if_the_model_forgot_to_cite_it(
+    monkeypatch: Any,
+) -> None:
+    graph, config = carded_conversation(
+        monkeypatch,
+        [understanding_for(search_query="flat white")],
+        [cited(answer="The Flat White is £9.50.")],  # cited_slugs left empty
+        [make_obj("flat white", image="flat-white.png")],
+    )
+
+    answer = graph.invoke({"question": "how much is the flat white"}, config=config)
+
+    assert card_slugs(answer) == ["flat-white"]
+
+
+def test_a_follow_up_answered_with_it_and_no_citation_shows_no_card(monkeypatch: Any) -> None:
+    """The search's best match is not guessed at: no citation and no name means no card, and the
+    previous answer's card is not brought back either."""
+    graph, config = carded_conversation(
+        monkeypatch,
+        [
+            understanding_for(search_query="flat white"),
+            understanding_for(search_query="flat white"),
+        ],
+        [
+            cited("flat-white", answer="The Flat White is £9.50."),
+            cited(answer="It is £9.50."),  # no name, and the model reported no citation
+        ],
+        [make_obj("flat white", image="flat-white.png")],
+    )
+
+    first = graph.invoke({"question": "the flat white"}, config=config)
+    follow_up = graph.invoke({"question": "and how much is it"}, config=config)
+
+    assert card_slugs(first) == ["flat-white"]
+    assert card_slugs(follow_up) == []
+
+
+def test_a_follow_up_answered_with_it_and_a_citation_shows_the_dish(monkeypatch: Any) -> None:
+    graph, config = carded_conversation(
+        monkeypatch,
+        [
+            understanding_for(search_query="flat white"),
+            understanding_for(search_query="flat white"),
+        ],
+        [
+            cited("flat-white", answer="The Flat White is £9.50."),
+            cited("flat-white", answer="It is £9.50."),
+        ],
+        [make_obj("flat white", image="flat-white.png")],
+    )
+
+    graph.invoke({"question": "the flat white"}, config=config)
+    follow_up = graph.invoke({"question": "and how much is it"}, config=config)
+
+    assert card_slugs(follow_up) == ["flat-white"]
+
+
+def test_a_citation_written_before_the_json_was_cut_off_still_gets_its_card(
+    monkeypatch: Any,
+) -> None:
+    cut_off = '{"answer": "It\'s £2.50.", "cited_slugs": ["double-espresso"'
+    graph, _ = _malformed_generation_graph(monkeypatch, cut_off)
+
+    _, final = _run_streaming(graph)
+
+    assert final["cited_slugs"] == ["double-espresso"]
+    assert card_slugs(final) == ["double-espresso"]
+
+
+# ---- a follow-up's "it" reaches generation with its referent (rules U-22, P-05, C-22) ------------
+
+
+def test_a_follow_up_reaches_generation_with_what_it_refers_to(monkeypatch: Any) -> None:
+    """Found live: "how many calories does it have?" after a katsu curry answer was declined,
+    because generation had no idea what "it" was. The understanding call resolves it; the
+    generation prompt now carries that, while the search still uses the guest's own words."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    kb = FakeKB([make_obj("flat white", image="flat-white.png")])
+    tool = RetrievalTool(kb=kb, cohere_api_key="")  # type: ignore[arg-type]
+    monkeypatch.setattr(tool, "rerank", _no_rerank)
+    client = ScriptedGroqClient(
+        [
+            understanding_for(search_query="flat white"),
+            understanding_for(
+                search_query="flat white",
+                resolved_question="How many calories does the flat white have?",
+            ),
+        ],
+        [
+            cited("flat-white", answer="The Flat White is £9.50."),
+            cited("flat-white", answer="The Flat White has 500 kcal."),
+        ],
+    )
+    graph = build_graph(
+        retrieval_tool=tool,
+        category_index=make_carded_index(),
+        groq_client=client,  # type: ignore[arg-type]
+        understand_model="m",
+        generation_model="m",
+        checkpointer=InMemorySaver(),
+    )
+    config: RunnableConfig = {"configurable": {"thread_id": "s"}}
+
+    graph.invoke({"question": "tell me about the flat white"}, config=config)
+    second = graph.invoke({"question": "how many calories does it have?"}, config=config)
+
+    first_generation = client.calls[1]["user_prompt"]
+    second_generation = client.calls[3]["user_prompt"]
+    assert (
+        "Read together with the earlier conversation" not in first_generation
+    )  # a stand-alone turn
+    assert "<guest_message>\ntell me about the flat white\n</guest_message>" in first_generation
+    assert (
+        "<guest_message>\nGuest's message: how many calories does it have?\n"
+        "Read together with the earlier conversation, this means: "
+        "How many calories does the flat white have?\n</guest_message>"
+    ) in second_generation
+    # C-22: the guest's own words still drive everything else
+    assert second["question"] == "how many calories does it have?"
+    assert second["history"][-1]["question"] == "how many calories does it have?"
+    assert second["understanding"]["search_query"] == "flat white"
+    assert card_slugs(second) == ["flat-white"]  # the answer names the dish
+
+
+def test_the_system_prompt_for_generation_is_the_same_with_or_without_a_resolved_question(
+    monkeypatch: Any,
+) -> None:
+    """P-05 needs no change to the system prompt: the extra line sits in the guest block."""
+    kb = FakeKB([make_obj("flat white", image="flat-white.png")])
+    tool = RetrievalTool(kb=kb, cohere_api_key="")  # type: ignore[arg-type]
+    monkeypatch.setattr(tool, "rerank", _no_rerank)
+    client = ScriptedGroqClient(
+        [
+            understanding_for(search_query="flat white"),
+            understanding_for(
+                search_query="flat white", resolved_question="Tell me about it, the flat white"
+            ),
+        ],
+        [cited("flat-white", answer="A."), cited("flat-white", answer="B.")],
+    )
+    graph = build_graph(
+        retrieval_tool=tool,
+        category_index=make_carded_index(),
+        groq_client=client,  # type: ignore[arg-type]
+        understand_model="m",
+        generation_model="m",
+    )
+
+    graph.invoke({"question": "tell me about it"})
+    graph.invoke({"question": "tell me about it"})
+
+    assert client.calls[1]["system_prompt"] == client.calls[3]["system_prompt"]
+
+
+# ---- a list of groups or categories carries picture cards, for that turn only (R-14, C-23) ------
+
+
+def test_the_menu_overview_puts_its_cards_in_the_state_and_keeps_the_text_for_history() -> None:
+    graph, client = direct_route_graph(understanding_for(intent="menu_browse"))
+
+    final = graph.invoke({"question": "what is your menu?"})
+
+    assert final["choices"]["intro"] == "Our menu is organised into these categories:"
+    assert final["choices"]["outro"] == "What kind of these would you like to see?"
+    assert [c["name"] for c in final["choices"]["cards"]] == ["drinks", "sides"]
+    assert "- drinks\n- sides" in final["answer"]  # the saved answer still has the list
+    assert final["history"][-1]["answer"] == final["answer"]
+    assert final["cited_items"] == []
+    assert len(client.calls) == 1  # still only the understanding call
+
+
+def test_a_groups_categories_come_as_cards() -> None:
+    graph, _ = direct_route_graph(understanding_for(intent="menu_browse", browse_group="drinks"))
+
+    final = graph.invoke({"question": "drinks"})
+
+    assert final["choices"]["intro"] == "In drinks we have these sub-categories:"
+    assert [c["name"] for c in final["choices"]["cards"]] == ["cocktails", "coffee + tea"]
+
+
+def test_a_list_reply_streams_only_the_sentence_before_its_cards() -> None:
+    """The bullet list is never shown and then swapped for cards: the one delta is the intro,
+    which the final answer starts with."""
+    graph, _ = direct_route_graph(understanding_for(intent="menu_browse"))
+
+    events = list(graph.stream({"question": "menu"}, stream_mode=["custom", "values"]))
+
+    deltas = [chunk["delta"] for mode, chunk in events if mode == "custom"]
+    final = [chunk for mode, chunk in events if mode == "values"][-1]
+    assert deltas == ["Our menu is organised into these categories:"]
+    assert final["answer"].startswith(deltas[0])
+
+
+def test_the_next_turns_have_no_cards_left_over_from_a_list(monkeypatch: Any) -> None:
+    """The state is saved per session; a turn that does not write `choices` would leave the
+    previous list's cards behind for the next answer (the same trap as item cards)."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    kb = FakeKB([make_obj("flat white", image="flat-white.png")])
+    tool = RetrievalTool(kb=kb, cohere_api_key="")  # type: ignore[arg-type]
+    monkeypatch.setattr(tool, "rerank", _no_rerank)
+    client = ScriptedGroqClient(
+        [
+            understanding_for(intent="menu_browse"),  # 1: a list
+            understanding_for(search_query="flat white"),  # 2: a searched answer
+            understanding_for(intent="menu_browse"),  # 3: a list again
+            understanding_for(intent="greeting"),  # 4: a greeting
+        ],
+        [cited("flat-white", answer="The Flat White is £9.50.")],
+    )
+    graph = build_graph(
+        retrieval_tool=tool,
+        category_index=make_browse_index(),
+        groq_client=client,  # type: ignore[arg-type]
+        understand_model="m",
+        generation_model="m",
+        checkpointer=InMemorySaver(),
+    )
+    config: RunnableConfig = {"configurable": {"thread_id": "s"}}
+
+    first = graph.invoke({"question": "menu"}, config=config)
+    searched = graph.invoke({"question": "the flat white"}, config=config)
+    second_list = graph.invoke({"question": "menu again"}, config=config)
+    greeting = graph.invoke({"question": "thanks"}, config=config)
+
+    assert first["choices"] is not None
+    assert searched["choices"] is None
+    assert second_list["choices"] is not None
+    assert greeting["choices"] is None

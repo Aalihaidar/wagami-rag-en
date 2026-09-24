@@ -320,6 +320,14 @@ Fields:
   -> search_query "yasai cha han (vegan recipe)", NOT "yasai cha han" (stripping it searches
   for a different recipe with different allergens than the one actually asked about). Never
   return an empty string -- fall back to the original question if nothing else to extract.
+- resolved_question: the guest's new message rewritten so it can be understood on its own.
+  Replace each pronoun or implicit reference ("it", "that one", "the vegan one", "the second
+  one") with the dish, drink or item it refers to, using the earlier turns. Change nothing
+  else: keep the guest's own words, and never add a price, allergy, diet or other requirement
+  from an earlier turn. Example: after a reply about the chicken katsu curry, "how many
+  calories does it have?" -> "How many calories does the chicken katsu curry have?". If the
+  message already stands on its own, or there is no earlier conversation, return it unchanged.
+  Never return an empty string.
 - category_hint: zero or more names from the menu category list below that best match any
   course-type language in the question (e.g. "starter", "small plate", "main", "dessert",
   "drink") -- the guest's word for a course type rarely matches this menu's own category

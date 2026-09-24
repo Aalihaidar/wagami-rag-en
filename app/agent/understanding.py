@@ -17,6 +17,7 @@ from app.agent import prompts
 from app.agent.catalog import CATALOG_PROPERTIES, MenuCatalog, build_catalog
 from app.agent.llm import GroqClient, Usage, zero_usage
 from app.retrieval import QueryUnderstanding
+from app.schemas import CHAT_MESSAGE_MAX_LENGTH
 
 NUT_ALLERGENS = {
     "peanuts",
@@ -167,6 +168,7 @@ def build_response_schema(category_index: CategoryIndex) -> dict:
                 "items": {"type": "string", "enum": ALLOWED_ALLERGENS},
             },
             "search_query": {"type": "string"},
+            "resolved_question": {"type": "string"},
             "category_hint": {
                 "type": "array",
                 "items": {"type": "string", "enum": category_index.categories},
@@ -184,6 +186,7 @@ def build_response_schema(category_index: CategoryIndex) -> dict:
             "price_max_gbp",
             "allergens_exclude",
             "search_query",
+            "resolved_question",
             "category_hint",
             "gluten_free_only",
             "kcal_max",
@@ -202,6 +205,9 @@ class UnderstandingResult(QueryUnderstanding):
     intent: Intent
     browse_group: str | None
     browse_category: str | None
+    # The guest's message with pronouns and implicit references filled in (rule U-22). Used only
+    # to word the generation prompt (rule C-22), never for routing, filters or the search.
+    resolved_question: str
     usage: Usage
 
 
@@ -235,6 +241,7 @@ def understand_query(
             "price_max_gbp": None,
             "allergens_exclude": [],
             "search_query": question,
+            "resolved_question": question,
             "category_hint": [],
             "gluten_free_only": False,
             "kcal_max": None,
@@ -274,6 +281,10 @@ def parse_understanding(
         # already handles exclusion correctly.
         category_hint = [c for c in category_hint if c not in category_index.alcoholic_only]
     search_query = (parsed.get("search_query") or "").strip() or question
+    resolved_question = parsed.get("resolved_question")
+    resolved_question = resolved_question.strip() if isinstance(resolved_question, str) else ""
+    if not resolved_question or len(resolved_question) > CHAT_MESSAGE_MAX_LENGTH:
+        resolved_question = question
     price_max_gbp = parsed.get("price_max_gbp")
     kcal_max = parsed.get("kcal_max")
     protein_min_g = parsed.get("protein_min_g")
@@ -314,6 +325,7 @@ def parse_understanding(
         "price_max_gbp": price_max_gbp,
         "allergens_exclude": allergens,
         "search_query": search_query,
+        "resolved_question": resolved_question,
         "category_hint": category_hint,
         "gluten_free_only": bool(parsed.get("gluten_free_only")),
         "kcal_max": kcal_max,

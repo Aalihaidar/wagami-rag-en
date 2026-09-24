@@ -5,6 +5,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -23,9 +24,9 @@ from slowapi.util import get_remote_address
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 from starlette.types import Receive, Scope, Send
 
+from app.agent.cards import Choices as GeneratedChoices
+from app.agent.cards import CitedItem as GeneratedCitedItem
 from app.agent.checkpointer import build_checkpointer
-from app.agent.generation import CitedItem as GeneratedCitedItem
-from app.agent.generation import cited_items_from_ranked
 from app.agent.graph import build_graph
 from app.agent.llm import AllKeysRateLimitedError, GroqClient, load_groq_key_pool
 from app.agent.understanding import load_category_index
@@ -44,7 +45,14 @@ from app.errors import (
 )
 from app.logging_config import configure_logging
 from app.retrieval import RetrievalTool, connect
-from app.schemas import ChatRequest, ChatResponse, CitedItem, SessionResponse
+from app.schemas import (
+    ChatRequest,
+    ChatResponse,
+    ChoiceCard,
+    Choices,
+    CitedItem,
+    SessionResponse,
+)
 from app.timing import timed, track_timings
 
 settings = get_settings()
@@ -316,15 +324,27 @@ def _log_turn_timings(timings: dict[str, float]) -> None:
     )
 
 
+@dataclass(frozen=True)
+class TurnReply:
+    """What one /chat turn hands back: the text, the item cards under it, and, for a list of
+    groups or categories, that reply cut around its list with a card per name."""
+
+    answer: str
+    cited: list[GeneratedCitedItem] = field(default_factory=list)
+    choices: GeneratedChoices | None = None
+
+
 def _cards_for_turn(final_state: dict[str, Any]) -> list[GeneratedCitedItem]:
-    """The item cards to show with a turn's reply. A direct reply that lists a category's items
-    supplies its own; on the search route they are the retrieved dishes the answer cited; a
-    greeting, an off-topic message or a browse that lists no items has none."""
-    direct_cards = final_state.get("cited_items")
-    if direct_cards is not None:
-        return list(direct_cards)
-    ranked = final_state.get("search_result", {}).get("ranked", [])
-    return cited_items_from_ranked(ranked, final_state.get("cited_slugs", []))
+    """The item cards to show with a turn's reply: exactly the ones the graph decided on for this
+    turn's answer (guarantee C-21). Nothing is derived here from other state fields, which the
+    per-session checkpoint carries over from earlier turns."""
+    return list(final_state.get("cited_items", []))
+
+
+def _choices_for_turn(final_state: dict[str, Any]) -> GeneratedChoices | None:
+    """The picture cards of this turn's reply, if it lists groups or categories: exactly what the
+    graph decided for this turn, for the same reason as _cards_for_turn()."""
+    return final_state.get("choices")
 
 
 def _precheck_reply(
@@ -352,7 +372,7 @@ def _run_chat_turn(
     redis_client: Redis,
     session_id: str,
     message: str,
-) -> tuple[str, list[GeneratedCitedItem]]:
+) -> TurnReply:
     """The blocking part of a /chat turn: conversation-cap and spend-cap checks, the graph
     invocation itself, and recording token usage -- run in one threadpool hop (Section A)
     so none of it blocks the event loop.
@@ -371,7 +391,7 @@ def _run_chat_turn(
     try:
         fixed_reply = _precheck_reply(graph, redis_client, config)
         if fixed_reply is not None:
-            return fixed_reply, []
+            return TurnReply(fixed_reply)
 
         with timed("graph"):
             final_state = graph.invoke({"question": message}, config=config)
@@ -381,15 +401,16 @@ def _run_chat_turn(
         # exactly: a temporary capacity situation, not a broken/unreachable backend, so it
         # deliberately isn't OUTBOUND_ERROR_REPLY.
         logger.warning("All Groq pool keys at local rate limit -- turn skipped, no LLM call made")
-        return CAPACITY_REPLY, []
+        return TurnReply(CAPACITY_REPLY)
     except TRANSIENT_OUTBOUND_ERRORS:
         logger.exception("Outbound service failure during a /chat turn")
-        return OUTBOUND_ERROR_REPLY, []
+        return TurnReply(OUTBOUND_ERROR_REPLY)
 
     with timed("cost_record"):
         record_token_usage(redis_client, final_state["usage"]["total_tokens"])
-    answer = final_state["answer"]
-    return answer, _cards_for_turn(final_state)
+    return TurnReply(
+        final_state["answer"], _cards_for_turn(final_state), _choices_for_turn(final_state)
+    )
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -407,21 +428,20 @@ async def chat(
     with track_timings() as timings:
         try:
             with timed("turn"):
-                answer, cited = await run_in_threadpool(
+                reply = await run_in_threadpool(
                     _run_chat_turn, graph, redis_client, payload.session_id, payload.message
                 )
         finally:
             await _release_chat_slot()
     _log_turn_timings(timings)
-    return _build_chat_response(payload.session_id, answer, cited)
+    return _build_chat_response(payload.session_id, reply)
 
 
-def _build_chat_response(
-    session_id: str, answer: str, cited: list[GeneratedCitedItem]
-) -> ChatResponse:
+def _build_chat_response(session_id: str, reply: TurnReply) -> ChatResponse:
+    choices = reply.choices
     return ChatResponse(
         session_id=session_id,
-        answer=answer,
+        answer=reply.answer,
         cited_items=[
             CitedItem(
                 id=item["id"],
@@ -432,8 +452,18 @@ def _build_chat_response(
                 price_gbp=item["price_gbp"],
                 image=_image_url(item["image"]),
             )
-            for item in cited
+            for item in reply.cited
         ],
+        choices=Choices(
+            intro=choices["intro"],
+            outro=choices["outro"],
+            cards=[
+                ChoiceCard(name=card["name"], image=_image_url(card["image"]))
+                for card in choices["cards"]
+            ],
+        )
+        if choices
+        else None,
     )
 
 
@@ -450,7 +480,7 @@ def _stream_chat_turn(
     message: str,
 ) -> Iterator[tuple[str, Any]]:
     """The blocking body of a /chat/stream turn, as a generator of ("delta", text) events
-    followed by exactly one ("done", (answer, cited_items)).
+    followed by exactly one ("done", TurnReply).
 
     Same guards and the same degrade-to-a-fallback-reply handling as _run_chat_turn() -- a
     failure before or during the stream still ends in a "done" carrying the fallback text, which
@@ -463,7 +493,7 @@ def _stream_chat_turn(
     try:
         fixed_reply = _precheck_reply(graph, redis_client, config)
         if fixed_reply is not None:
-            yield "done", (fixed_reply, [])
+            yield "done", TurnReply(fixed_reply)
             return
 
         with timed("graph"):
@@ -479,18 +509,22 @@ def _stream_chat_turn(
                     final_state = chunk
     except AllKeysRateLimitedError:
         logger.warning("All Groq pool keys at local rate limit -- turn skipped, no LLM call made")
-        yield "done", (CAPACITY_REPLY, [])
+        yield "done", TurnReply(CAPACITY_REPLY)
         return
     except TRANSIENT_OUTBOUND_ERRORS:
         logger.exception("Outbound service failure during a /chat/stream turn")
-        yield "done", (OUTBOUND_ERROR_REPLY, [])
+        yield "done", TurnReply(OUTBOUND_ERROR_REPLY)
         return
 
     assert final_state is not None, "graph.stream() ended without a final state"
     with timed("cost_record"):
         record_token_usage(redis_client, final_state["usage"]["total_tokens"])
-    cited = _cards_for_turn(final_state)
-    yield "done", (final_state["answer"], cited)
+    yield (
+        "done",
+        TurnReply(
+            final_state["answer"], _cards_for_turn(final_state), _choices_for_turn(final_state)
+        ),
+    )
 
 
 async def _sse_events(
@@ -511,8 +545,7 @@ async def _sse_events(
                     timings.setdefault("first_delta", (time.perf_counter() - started) * 1000)
                     yield _sse("delta", {"text": data})
                 else:
-                    answer, cited = data
-                    response = _build_chat_response(payload.session_id, answer, cited)
+                    response = _build_chat_response(payload.session_id, data)
                     yield _sse("done", response.model_dump())
         except Exception:
             # Headers (HTTP 200) are long gone by now, so the generic-500 handler can't run:

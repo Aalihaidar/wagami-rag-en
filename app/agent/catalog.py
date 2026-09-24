@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any
 
+from app.agent.choice_images import dish_image_path
+
 # Fields read from each row to build the catalog (a subset of the collection's properties).
 CATALOG_PROPERTIES = [
     "item_type",
@@ -70,7 +72,7 @@ class MenuItem:
     description: str | None = None
     ingredients: tuple[str, ...] = ()
     price_gbp: float | None = None
-    image: str | None = None
+    image: str | None = None  # the photo's path in the image tree, not the row's bare filename
 
 
 def _menu_item(row: Mapping[str, Any], name: str) -> MenuItem:
@@ -87,14 +89,36 @@ def _menu_item(row: Mapping[str, Any], name: str) -> MenuItem:
         if isinstance(ingredients, list)
         else (),
         price_gbp=float(price) if isinstance(price, int | float) else None,
-        image=image if isinstance(image, str) and image else None,
+        image=dish_image_path(_path(row), image) if isinstance(image, str) and image else None,
     )
 
 
-def _normalise(text: str) -> str:
+def normalise(text: str) -> str:
     """Lower-cased words separated by single spaces, punctuation dropped: "Roku G+T?" and
     "roku g t" compare equal, so a guest's punctuation cannot hide a dish name."""
     return " ".join(re.sub(r"[\W_]+", " ", text.lower()).split())
+
+
+def mentioned_names(text: str, names: Iterable[str]) -> set[str]:
+    """The normalised form of each of `names` that `text` contains as whole words, ignoring case
+    and punctuation.
+
+    A name that only occurs inside a longer name that is also in the text does not count: dish
+    names nest ("coke" in "diet coke", "chicken katsu curry" in "hot chicken katsu curry"), and
+    text that names the longer dish is not talking about the shorter one.
+    """
+    padded = f" {normalise(text)} "
+    found: list[tuple[int, int, str]] = []
+    for name in {normalise(n) for n in names} - {""}:
+        found.extend(
+            (m.start(), m.end(), name)
+            for m in re.finditer(rf"(?<= ){re.escape(name)}(?= )", padded)
+        )
+    return {
+        name
+        for start, end, name in found
+        if not any(s <= start and end <= e and e - s > end - start for s, e, _ in found)
+    }
 
 
 @dataclass(frozen=True)
@@ -143,7 +167,7 @@ class MenuCatalog:
     @cached_property
     def _item_names(self) -> frozenset[str]:
         names = {
-            _normalise(name)
+            normalise(name)
             for categories in self.menu_items.values()
             for items in categories.values()
             for name in items
@@ -153,7 +177,7 @@ class MenuCatalog:
     def mentions_menu_item(self, text: str) -> bool:
         """True if `text` contains the full name of any menu item, as whole words and ignoring
         case and punctuation. Used to catch a dish question the model wrongly called off-topic."""
-        padded = f" {_normalise(text)} "
+        padded = f" {normalise(text)} "
         return any(f" {name} " in padded for name in self._item_names)
 
 

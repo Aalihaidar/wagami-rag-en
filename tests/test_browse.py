@@ -200,7 +200,7 @@ def test_a_category_listing_returns_a_card_for_each_item_that_has_an_image(
         "description": "sweeten with cane syrup",
         "ingredients": ["sweeten with cane syrup", "milk", "coffee"],
         "price_gbp": 2.5,
-        "image": "iced-latte.png",
+        "image": "drinks/coffee-tea/iced-latte.png",  # its folder in the image tree
     }
 
 
@@ -225,6 +225,7 @@ def test_choosing_a_group_with_one_category_also_lists_items_with_cards(
 
     assert answer.text.startswith("Here is everything in extras:")
     assert [c["name"] for c in answer.cards] == ["Chillies"]
+    assert answer.cards[0]["image"] == "extras/c.png"  # a one-category group has no subfolder
 
 
 @pytest.mark.parametrize(
@@ -285,3 +286,99 @@ def test_each_sentence_of_the_description_is_said_once_but_real_ingredients_stay
         "- Americano: served black or with milk; ingredients: milk, coffee; price: £2.50."
     )
     assert americano_line in americano
+
+
+# ---- lists of groups and categories come as picture cards (rules R-14, C-23) ---------------------
+
+
+@pytest.fixture
+def pictured() -> MenuCatalog:
+    """A catalog with a multi-category group ("drinks"), for the choice-card tests below: their
+    card picture is the cover in the group's or category's own folder, computed from the names,
+    not read from any dish here, so what a dish row carries (including whether it has an image)
+    is irrelevant."""
+    return build_catalog(
+        [
+            _row("Lychee Sangria", ["drinks", "cocktails"]),
+            _row("Flat White", ["drinks", "coffee + tea"]),
+            _row("Plain Water", ["drinks", "soft drinks"]),
+            _row("Gyoza", ["sides", "gyoza"]),
+        ]
+    )
+
+
+def test_the_menu_overview_is_cut_around_its_list_with_a_card_per_group(
+    pictured: MenuCatalog,
+) -> None:
+    answer = browse_answer(pictured, None, None)
+
+    assert answer.choices is not None
+    assert answer.choices["intro"] == "Our menu is organised into these categories:"
+    assert answer.choices["outro"] == "What kind of these would you like to see?"
+    assert answer.choices["cards"] == [
+        {"name": "drinks", "image": "drinks/cover.png"},
+        {"name": "sides", "image": "sides/cover.png"},
+    ]
+    assert answer.cards == []  # these are not item cards
+
+
+def test_a_groups_categories_are_cut_around_the_list_with_a_card_per_category(
+    pictured: MenuCatalog,
+) -> None:
+    answer = browse_answer(pictured, "drinks", None)
+
+    assert answer.choices is not None
+    assert answer.choices["intro"] == "In drinks we have these sub-categories:"
+    assert answer.choices["outro"] == "Which of these would you like to see?"
+    assert answer.choices["cards"] == [
+        {"name": "cocktails", "image": "drinks/cocktails/cover.png"},
+        {"name": "coffee + tea", "image": "drinks/coffee-tea/cover.png"},
+        {"name": "soft drinks", "image": "drinks/soft-drinks/cover.png"},
+    ]
+
+
+def test_the_saved_text_keeps_the_bullet_list_so_the_next_message_can_choose_from_it(
+    pictured: MenuCatalog,
+) -> None:
+    overview = browse_answer(pictured, None, None)
+    group = browse_answer(pictured, "drinks", None)
+
+    assert overview.text == (
+        "Our menu is organised into these categories:\n- drinks\n- sides\n\n"
+        "What kind of these would you like to see?"
+    )
+    assert "- cocktails\n- coffee + tea\n- soft drinks" in group.text
+    # the same reply as before this change, word for word
+    assert browse_reply(pictured, None, None) == overview.text
+
+
+def test_intro_and_cards_and_outro_say_the_same_thing_as_the_text(pictured: MenuCatalog) -> None:
+    for group, category in [(None, None), ("drinks", None)]:
+        answer = browse_answer(pictured, group, category)
+        assert answer.choices is not None
+        rebuilt = "\n".join(f"- {card['name']}" for card in answer.choices["cards"])
+
+        assert answer.text == f"{answer.choices['intro']}\n{rebuilt}\n\n{answer.choices['outro']}"
+
+
+@pytest.mark.parametrize(
+    ("group", "category"),
+    [("extras", None), (None, "cocktails"), (None, "ramen")],
+)
+def test_other_browse_replies_have_no_choice_cards(
+    catalog: MenuCatalog, group: str | None, category: str | None
+) -> None:
+    """A group with one category lists items, a category lists items with item cards, and an
+    ambiguous category is one sentence: none is a list of groups or categories."""
+    assert browse_answer(catalog, group, category).choices is None
+
+
+def test_greetings_and_off_topic_replies_have_no_choice_cards(catalog: MenuCatalog) -> None:
+    assert direct_answer({"intent": "greeting"}, catalog).choices is None
+    assert direct_answer({"intent": "off_topic"}, catalog).choices is None
+
+
+def test_an_empty_catalog_has_nothing_to_show_as_cards() -> None:
+    answer = browse_answer(MenuCatalog(), None, None)
+
+    assert answer.choices is None

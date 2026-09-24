@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from app.agent.catalog import LIMITED_VALUE_FIELDS, build_catalog
+from app.agent.catalog import LIMITED_VALUE_FIELDS, build_catalog, mentioned_names
 from app.agent.prompts import FIELD_GUIDE, render_knowledge_base_structure
 
 # Small corpus with the same shape problems as the real one: a group that is also a category
@@ -189,7 +189,7 @@ def test_item_details_keep_what_a_listing_and_a_card_need() -> None:
     latte = next(i for i in details if i.slug == "b-latte")
     assert (latte.id, latte.name, latte.description) == ("id-b", "b Latte", "with oat")
     assert latte.ingredients == ("oat", "coffee")
-    assert (latte.price_gbp, latte.image) == (2.5, "b-latte.png")
+    assert (latte.price_gbp, latte.image) == (2.5, "drinks/coffee-tea/b-latte.png")
 
 
 def test_missing_details_are_none_or_empty_not_invented() -> None:
@@ -321,3 +321,36 @@ def test_every_real_menu_item_has_what_its_card_needs(corpus_rows: list[dict]) -
 
     assert len(items) == 162
     assert all(item.id and item.slug and item.name and item.image for item in items)
+
+
+# ---- mentioned_names: which dish names a piece of text contains ---------------------------------
+
+
+def test_mentioned_names_match_whole_words_ignoring_case_and_punctuation() -> None:
+    names = ["Roku G+T", "Flat White", "Duck"]
+
+    assert mentioned_names("Try the roku g+t, or a FLAT WHITE!", names) == {
+        "roku g t",
+        "flat white",
+    }
+    assert mentioned_names("a duckling and a flat whites", names) == set()
+
+
+def test_a_name_inside_a_longer_mentioned_name_does_not_count() -> None:
+    names = ["Coke", "Diet Coke", "Chicken Katsu Curry", "Hot Chicken Katsu Curry"]
+
+    assert mentioned_names("A Diet Coke is £2.", names) == {"diet coke"}
+    assert mentioned_names("The hot chicken katsu curry is £12.", names) == {
+        "hot chicken katsu curry"
+    }
+
+
+def test_a_short_name_still_counts_when_it_is_also_named_on_its_own() -> None:
+    names = ["Coke", "Diet Coke"]
+
+    assert mentioned_names("Diet Coke is £2 and Coke is £2.50.", names) == {"coke", "diet coke"}
+
+
+def test_mentioned_names_ignores_blank_names_and_empty_text() -> None:
+    assert mentioned_names("anything", ["", "  ", "!!"]) == set()
+    assert mentioned_names("", ["Coke"]) == set()

@@ -7,6 +7,11 @@ group or category a browse names); this module turns that decision into the repl
 lists come from the corpus, they can never name a category that does not exist, and because no
 retrieval runs there is nothing to rank or hallucinate.
 
+When a browse lists groups or categories, the reply also comes cut into an opening sentence, a
+picture card per name -- the cover picture in that group's or category's own image folder (see
+app.agent.choice_images) -- and a closing question, so the chat page can show cards where the
+bullet list would be; the text with the list is kept for history.
+
 When a browse reaches the items of a category, each item is described (description, ingredients,
 price) and gets a card with its image, exactly as in a single-dish answer -- again from the
 catalog, so it costs no search and no model call.
@@ -19,8 +24,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.agent.cards import ChoiceCard, Choices, CitedItem, card_for_item
 from app.agent.catalog import MenuCatalog, MenuItem
-from app.agent.generation import CitedItem
+from app.agent.choice_images import category_image_filename, group_image_filename
 from app.agent.prompts import (
     AMBIGUOUS_CATEGORY_REPLY,
     CATEGORY_ITEMS_REPLY,
@@ -36,11 +42,13 @@ DIRECT_INTENTS = frozenset({"greeting", "off_topic", "menu_browse"})
 
 @dataclass(frozen=True)
 class DirectAnswer:
-    """A direct reply: the text, and the item cards to show under it (empty unless the reply
-    lists a category's items)."""
+    """A direct reply: the text (whole, with any bullet list -- what is saved to history), the item
+    cards to show under it (empty unless the reply lists a category's items), and, when the reply
+    lists groups or categories, that reply cut around its list with a card per name."""
 
     text: str
     cards: list[CitedItem] = field(default_factory=list)
+    choices: Choices | None = None
 
 
 def _options(names: list[str]) -> str:
@@ -67,23 +75,27 @@ def _describe(item: MenuItem) -> str:
     return f"- {item.name}: {'; '.join(details)}." if details else f"- {item.name}"
 
 
-def _card(item: MenuItem) -> CitedItem | None:
-    """The card for an item, or None if it has no image (a card without a picture is not shown)."""
-    if not item.image:
-        return None
-    return {
-        "id": item.id,
-        "slug": item.slug,
-        "name": item.name,
-        "description": item.description,
-        "ingredients": list(item.ingredients),
-        "price_gbp": item.price_gbp,
-        "image": item.image,
-    }
+# Stands in for {options} to find where a reply's list goes.
+_LIST_MARK = "\x00options\x00"
+
+
+def _choices(template: str, cards: list[ChoiceCard], **fields: str) -> DirectAnswer:
+    """A fixed reply that lists `cards`' names: the whole text with the bullet list, and the same
+    reply cut around the list. The wording stays the template's own."""
+    text = template.format(options=_options([card["name"] for card in cards]), **fields)
+    intro, outro = template.format(options=_LIST_MARK, **fields).split(_LIST_MARK)
+    if not cards:
+        return DirectAnswer(text)
+    return DirectAnswer(
+        text, choices={"intro": intro.strip(), "outro": outro.strip(), "cards": cards}
+    )
 
 
 def _overview(catalog: MenuCatalog) -> DirectAnswer:
-    return DirectAnswer(MENU_OVERVIEW_REPLY.format(options=_options(catalog.groups)))
+    cards: list[ChoiceCard] = [
+        {"name": group, "image": group_image_filename(group)} for group in catalog.groups
+    ]
+    return _choices(MENU_OVERVIEW_REPLY, cards)
 
 
 def _items(catalog: MenuCatalog, group: str, category: str) -> DirectAnswer:
@@ -92,7 +104,7 @@ def _items(catalog: MenuCatalog, group: str, category: str) -> DirectAnswer:
     text = CATEGORY_ITEMS_REPLY.format(
         label=label, options="\n".join(_describe(item) for item in items)
     )
-    return DirectAnswer(text, [card for item in items if (card := _card(item)) is not None])
+    return DirectAnswer(text, [card for item in items if (card := card_for_item(item)) is not None])
 
 
 def _group(catalog: MenuCatalog, group: str) -> DirectAnswer:
@@ -103,7 +115,11 @@ def _group(catalog: MenuCatalog, group: str) -> DirectAnswer:
         return _overview(catalog)
     if len(categories) == 1:
         return _items(catalog, group, categories[0])
-    return DirectAnswer(GROUP_REPLY.format(group=group, options=_options(categories)))
+    cards: list[ChoiceCard] = [
+        {"name": category, "image": category_image_filename(group, category)}
+        for category in categories
+    ]
+    return _choices(GROUP_REPLY, cards, group=group)
 
 
 def _category(catalog: MenuCatalog, group: str | None, category: str) -> DirectAnswer:
