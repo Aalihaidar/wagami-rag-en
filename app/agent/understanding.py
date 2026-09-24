@@ -211,6 +211,37 @@ class UnderstandingResult(QueryUnderstanding):
     usage: Usage
 
 
+def _plain_understanding(question: str) -> UnderstandingResult:
+    """A plain menu search on the question as written: no filters, no model call."""
+    return {
+        "intent": "menu",
+        "browse_group": None,
+        "browse_category": None,
+        "dietary": None,
+        "price_max_gbp": None,
+        "allergens_exclude": [],
+        "search_query": question,
+        "resolved_question": question,
+        "category_hint": [],
+        "gluten_free_only": False,
+        "kcal_max": None,
+        "protein_min_g": None,
+        "alcohol_free": False,
+        "usage": zero_usage(),
+    }
+
+
+def picked_browse(question: str, group: str, category: str | None) -> UnderstandingResult:
+    """The understanding of a click on a group or category card (rule R-15): a browse of exactly
+    that group or category, known without a model call, so it costs no tokens."""
+    return {
+        **_plain_understanding(question),
+        "intent": "menu_browse",
+        "browse_group": group,
+        "browse_category": category,
+    }
+
+
 def understand_query(
     question: str,
     *,
@@ -233,22 +264,7 @@ def understand_query(
     `search_query`.
     """
     if groq_client is None:
-        return {
-            "intent": "menu",
-            "browse_group": None,
-            "browse_category": None,
-            "dietary": None,
-            "price_max_gbp": None,
-            "allergens_exclude": [],
-            "search_query": question,
-            "resolved_question": question,
-            "category_hint": [],
-            "gluten_free_only": False,
-            "kcal_max": None,
-            "protein_min_g": None,
-            "alcohol_free": False,
-            "usage": zero_usage(),
-        }
+        return _plain_understanding(question)
     user_message = f"{context}\n\nGuest's new message: {question}" if context else question
     resp = groq_client.call(
         build_understand_system_prompt(category_index),

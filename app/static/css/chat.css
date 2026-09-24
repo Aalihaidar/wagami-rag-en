@@ -220,6 +220,8 @@ body {
 }
 
 .item-card {
+  /* The containing block of the name button's stretched click area (.card-ask::after). */
+  position: relative;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border);
@@ -229,15 +231,11 @@ body {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
-.item-card__image-button {
+.item-card__image-frame {
+  position: relative;
   display: block;
   width: 100%;
   aspect-ratio: 4 / 3;
-  padding: 0;
-  margin: 0;
-  border: none;
-  background: none;
-  cursor: zoom-in;
   overflow: hidden;
 }
 
@@ -249,8 +247,8 @@ body {
   transition: transform 0.2s ease;
 }
 
-.item-card__image-button:hover .item-card__image,
-.item-card__image-button:focus-visible .item-card__image {
+.item-card:hover .item-card__image,
+.item-card:has(.card-ask:focus-visible) .item-card__image {
   transform: scale(1.05);
 }
 
@@ -310,17 +308,27 @@ body {
   white-space: pre-wrap;
 }
 
+/* A bubble that lists groups or categories takes its full width (up to .message's max-width)
+   instead of shrinking to its opening sentence, so the cards get the same room -- and the same
+   size -- whatever that sentence says. */
+.message:has(> .choice-cards) {
+  width: 100%;
+}
+
 .choice-cards {
   list-style: none;
   margin: 10px 0;
   padding: 0;
   display: grid;
-  /* min(100%, ...) so a single column can never be wider than the bubble it sits in. */
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 9rem), 1fr));
+  /* Fixed-size columns, so a group's card and a category's card are the same size; min(100%, ...)
+     so a single column can never be wider than the bubble it sits in. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 9rem), 9.5rem));
   gap: 10px;
 }
 
 .choice-card {
+  /* The containing block of the name button's stretched click area (.card-ask::after). */
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -335,17 +343,14 @@ body {
 }
 
 /* The group's or category's cover picture, shown whole at its own shape (the covers are
-   square) -- no fixed frame, so nothing is cropped. Same zoom-on-click affordance as an item
-   card's photo. flex-shrink: 0 stops the card's column from squashing it. */
-.choice-card__picture-button {
+   square) -- no fixed frame, so nothing is cropped. flex-shrink: 0 stops the card's column from
+   squashing it. */
+.choice-card__picture-frame {
+  position: relative;
   display: block;
   flex-shrink: 0;
   width: 100%;
-  padding: 0;
-  margin: 0;
-  border: none;
   background: var(--border);
-  cursor: zoom-in;
   /* Follows the card's own corner (radius minus the padding), so the frame reads as inset. */
   border-radius: calc(var(--radius) - 8px);
   overflow: hidden;
@@ -359,8 +364,8 @@ body {
   transition: transform 0.2s ease;
 }
 
-.choice-card__picture-button:hover .choice-card__picture,
-.choice-card__picture-button:focus-visible .choice-card__picture {
+.choice-card:hover .choice-card__picture,
+.choice-card:has(.card-ask:focus-visible) .choice-card__picture {
   transform: scale(1.05);
 }
 
@@ -375,6 +380,77 @@ body {
   font-size: 0.9rem;
   color: var(--text);
   white-space: normal;
+}
+
+/* A card is one click target (rule R-15): its name is a button whose ::after covers the whole
+   card, so a click on the picture or the text asks about it. The zoom button sits above that. */
+/* :where() keeps the reset at zero specificity, so the name's own font, padding and alignment
+   (.item-card__name, .choice-card__name) still apply. */
+:where(.card-ask) {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.card-ask::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.card-ask:focus-visible {
+  outline: none;
+}
+
+.item-card,
+.choice-card {
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.item-card:hover,
+.choice-card:hover {
+  border-color: var(--accent);
+}
+
+.item-card:has(.card-ask:focus-visible),
+.choice-card:has(.card-ask:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.card-zoom {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: zoom-in;
+}
+
+.card-zoom svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+.card-zoom:hover,
+.card-zoom:focus-visible {
+  background: rgba(0, 0, 0, 0.75);
 }
 
 .typing-indicator {

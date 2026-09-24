@@ -93,7 +93,8 @@ def _choices(template: str, cards: list[ChoiceCard], **fields: str) -> DirectAns
 
 def _overview(catalog: MenuCatalog) -> DirectAnswer:
     cards: list[ChoiceCard] = [
-        {"name": group, "image": group_image_filename(group)} for group in catalog.groups
+        {"name": group, "image": group_image_filename(group), "group": group, "category": None}
+        for group in catalog.groups
     ]
     return _choices(MENU_OVERVIEW_REPLY, cards)
 
@@ -116,7 +117,12 @@ def _group(catalog: MenuCatalog, group: str) -> DirectAnswer:
     if len(categories) == 1:
         return _items(catalog, group, categories[0])
     cards: list[ChoiceCard] = [
-        {"name": category, "image": category_image_filename(group, category)}
+        {
+            "name": category,
+            "image": category_image_filename(group, category),
+            "group": group,
+            "category": category,
+        }
         for category in categories
     ]
     return _choices(GROUP_REPLY, cards, group=group)
@@ -155,6 +161,16 @@ def browse_answer(catalog: MenuCatalog, group: str | None, category: str | None)
     if group:
         return _group(catalog, group)
     return _overview(catalog)
+
+
+def is_known_pick(catalog: MenuCatalog, group: str, category: str | None) -> bool:
+    """True if a clicked card's group (and category) exist in the catalog, so the click can be
+    answered as that browse without an understanding call (rule R-15). Anything else -- a stale
+    page after the menu changed, a hand-made request -- goes through understanding like typed
+    text."""
+    if group not in catalog.groups:
+        return False
+    return category is None or category in catalog.categories_of(group)
 
 
 def direct_answer(understanding: Mapping[str, Any], catalog: MenuCatalog) -> DirectAnswer:

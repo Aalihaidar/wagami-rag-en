@@ -46,6 +46,7 @@ from app.errors import (
 from app.logging_config import configure_logging
 from app.retrieval import RetrievalTool, connect
 from app.schemas import (
+    BrowsePick,
     ChatRequest,
     ChatResponse,
     ChoiceCard,
@@ -367,11 +368,18 @@ def _precheck_reply(
     return CAPACITY_REPLY if over_spend_limit else None
 
 
+def _graph_input(message: str, browse: BrowsePick | None) -> dict[str, Any]:
+    """One turn's graph input. `browse` is always written, None when absent: the state is saved
+    per session, so leaving it out would let a previous card click steer this turn."""
+    return {"question": message, "browse": browse.model_dump() if browse else None}
+
+
 def _run_chat_turn(
     graph: CompiledStateGraph,
     redis_client: Redis,
     session_id: str,
     message: str,
+    browse: BrowsePick | None = None,
 ) -> TurnReply:
     """The blocking part of a /chat turn: conversation-cap and spend-cap checks, the graph
     invocation itself, and recording token usage -- run in one threadpool hop (Section A)
@@ -394,7 +402,7 @@ def _run_chat_turn(
             return TurnReply(fixed_reply)
 
         with timed("graph"):
-            final_state = graph.invoke({"question": message}, config=config)
+            final_state = graph.invoke(_graph_input(message, browse), config=config)
     except AllKeysRateLimitedError:
         # Every Groq pool key is at its own local RPM/RPD budget -- nothing was actually sent
         # to Groq for this turn. CAPACITY_REPLY (Section D's spend-cap message) fits this
@@ -429,7 +437,12 @@ async def chat(
         try:
             with timed("turn"):
                 reply = await run_in_threadpool(
-                    _run_chat_turn, graph, redis_client, payload.session_id, payload.message
+                    _run_chat_turn,
+                    graph,
+                    redis_client,
+                    payload.session_id,
+                    payload.message,
+                    payload.browse,
                 )
         finally:
             await _release_chat_slot()
@@ -458,7 +471,12 @@ def _build_chat_response(session_id: str, reply: TurnReply) -> ChatResponse:
             intro=choices["intro"],
             outro=choices["outro"],
             cards=[
-                ChoiceCard(name=card["name"], image=_image_url(card["image"]))
+                ChoiceCard(
+                    name=card["name"],
+                    image=_image_url(card["image"]),
+                    group=card["group"],
+                    category=card["category"],
+                )
                 for card in choices["cards"]
             ],
         )
@@ -478,6 +496,7 @@ def _stream_chat_turn(
     redis_client: Redis,
     session_id: str,
     message: str,
+    browse: BrowsePick | None = None,
 ) -> Iterator[tuple[str, Any]]:
     """The blocking body of a /chat/stream turn, as a generator of ("delta", text) events
     followed by exactly one ("done", TurnReply).
@@ -498,7 +517,7 @@ def _stream_chat_turn(
 
         with timed("graph"):
             for item in graph.stream(
-                {"question": message}, config=config, stream_mode=["custom", "values"]
+                _graph_input(message, browse), config=config, stream_mode=["custom", "values"]
             ):
                 # With a list of modes LangGraph yields (mode, chunk) pairs; its stubs only
                 # describe the single-mode (bare chunk) shape.
@@ -539,7 +558,9 @@ async def _sse_events(
     with track_timings() as timings:
         try:
             async for event, data in iterate_in_threadpool(
-                _stream_chat_turn(graph, redis_client, payload.session_id, payload.message)
+                _stream_chat_turn(
+                    graph, redis_client, payload.session_id, payload.message, payload.browse
+                )
             ):
                 if event == "delta":
                     timings.setdefault("first_delta", (time.perf_counter() - started) * 1000)

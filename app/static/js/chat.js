@@ -44,6 +44,49 @@ function scrollToBottom() {
   messageLog.scrollTo({ top: messageLog.scrollHeight, behavior: "smooth" });
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** The small magnifier button on a card's picture: opens it in the zoom view. It sits above the
+ * card's own click area (the name button's stretched ::after), so a click on it zooms instead of
+ * asking about the card. */
+function buildZoomButton(src, name) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "card-zoom";
+  button.setAttribute("aria-label", `View larger image of ${name}`);
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(SVG_NS, "path");
+  path.setAttribute(
+    "d",
+    "M10.5 4a6.5 6.5 0 1 0 4 11.6l4.4 4.4 1.4-1.4-4.4-4.4A6.5 6.5 0 0 0 10.5 4z" +
+      "m0 2a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9z"
+  );
+  svg.appendChild(path);
+  button.appendChild(svg);
+  button.addEventListener("click", () => openLightbox(src, name, button));
+  return button;
+}
+
+/** A card's name as the button that asks about the card (rule R-15): its ::after stretches over
+ * the whole card, so a click anywhere on it -- picture included -- sends `question`, with
+ * `browse` for a group or category card. The question is not shown as a guest bubble -- the
+ * reply just appears -- but the server still saves it to history, so a follow-up can refer to
+ * it. Ignored while a reply is still in flight, like the composer. */
+function buildAskButton(className, name, question, browse = null) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `${className} card-ask`;
+  button.textContent = name;
+  button.setAttribute("aria-label", question);
+  button.addEventListener("click", () => {
+    if (messageInput.disabled || !sessionId) return;
+    sendMessage(question, { browse, showGuestBubble: false });
+  });
+  return button;
+}
+
 /** One cited item (name/description/ingredients/price/image) as a card -- deliberately just
  * these four text fields (Section 4): dietary tags, allergens, and nutrition are real
  * CONTEXT fields the model can see and state in the answer text itself, not duplicated onto
@@ -54,27 +97,21 @@ function buildItemCard(item) {
   const card = document.createElement("div");
   card.className = "item-card";
 
-  const imageButton = document.createElement("button");
-  imageButton.type = "button";
-  imageButton.className = "item-card__image-button";
-  imageButton.setAttribute("aria-label", `View larger image of ${item.name}`);
-
+  const frame = document.createElement("div");
+  frame.className = "item-card__image-frame";
   const img = document.createElement("img");
   img.className = "item-card__image";
   img.src = item.image;
   img.alt = item.name;
   img.loading = "lazy";
-  imageButton.appendChild(img);
-  imageButton.addEventListener("click", () => openLightbox(item.image, item.name, imageButton));
-  card.appendChild(imageButton);
+  frame.appendChild(img);
+  frame.appendChild(buildZoomButton(item.image, item.name));
+  card.appendChild(frame);
 
   const body = document.createElement("div");
   body.className = "item-card__body";
 
-  const name = document.createElement("p");
-  name.className = "item-card__name";
-  name.textContent = item.name;
-  body.appendChild(name);
+  body.appendChild(buildAskButton("item-card__name", item.name, `Tell me about ${item.name}`));
 
   if (item.description) {
     const description = document.createElement("p");
@@ -112,37 +149,34 @@ function appendItemCards(bubble, items) {
   bubble.appendChild(gallery);
 }
 
-/** One group or category in a list of them: the picture prepared for it and its name. Not every
- * name necessarily has a picture uploaded yet, so a missing/failed one is dropped and the card is
- * just its name -- same "drop on error" handling as an item card's photo, and the same click-to-
- * zoom via the lightbox. Every text field is set via textContent, as for the item cards. */
+/** One group or category in a list of them: its cover picture and its name. A click on the card
+ * browses into it (rule R-15) -- a group's card shows its categories, a category's card its
+ * items -- by sending the card's group/category with a readable question. A missing/failed
+ * picture is dropped and the card is just its name. Every text field is set via textContent, as
+ * for the item cards. */
 function buildChoiceCard(card) {
   const item = document.createElement("li");
   item.className = "choice-card";
 
   if (card.image) {
-    const pictureButton = document.createElement("button");
-    pictureButton.type = "button";
-    pictureButton.className = "choice-card__picture-button";
-    pictureButton.setAttribute("aria-label", `View larger image of ${card.name}`);
-
+    const frame = document.createElement("div");
+    frame.className = "choice-card__picture-frame";
     const img = document.createElement("img");
     img.className = "choice-card__picture";
     img.src = card.image;
     img.alt = "";
     img.loading = "lazy";
-    img.addEventListener("error", () => pictureButton.remove());
-    pictureButton.appendChild(img);
-    pictureButton.addEventListener("click", () =>
-      openLightbox(card.image, card.name, pictureButton)
-    );
-    item.appendChild(pictureButton);
+    img.addEventListener("error", () => frame.remove());
+    frame.appendChild(img);
+    frame.appendChild(buildZoomButton(card.image, card.name));
+    item.appendChild(frame);
   }
 
-  const name = document.createElement("p");
-  name.className = "choice-card__name";
-  name.textContent = card.name;
-  item.appendChild(name);
+  const question = card.category
+    ? `Show me ${card.category} from ${card.group}`
+    : `Show me ${card.group}`;
+  const browse = { group: card.group, category: card.category ?? null };
+  item.appendChild(buildAskButton("choice-card__name", card.name, question, browse));
   return item;
 }
 
@@ -285,9 +319,15 @@ async function startNewChat() {
   messageInput.focus();
 }
 
-async function sendMessage(text) {
-  appendMessage("guest", text);
+/** Sends one guest message. `browse` is set only by a click on a group or category card, and
+ * tells the server exactly which one (rule R-15). A card click also passes
+ * `showGuestBubble: false`: `text` is sent and saved to history, but not shown in the chat. */
+async function sendMessage(text, { browse = null, showGuestBubble = true } = {}) {
+  if (showGuestBubble) appendMessage("guest", text);
   showTypingIndicator();
+  // A card can be clicked from further up the log; with no guest bubble to follow, bring the
+  // guest down to where the reply is about to appear.
+  if (!showGuestBubble) scrollToBottom();
   setBusy(true);
 
   inFlightController = new AbortController();
@@ -297,7 +337,7 @@ async function sendMessage(text) {
     const response = await fetch("/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: sessionId, message: text }),
+      body: JSON.stringify({ session_id: sessionId, message: text, ...(browse && { browse }) }),
       signal: inFlightController.signal,
     });
 

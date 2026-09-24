@@ -62,6 +62,10 @@ class ChoiceCard(TypedDict):
 
     name: str
     image: str
+    # What a click on the card browses to (rule R-15): its group, and its category for a
+    # category's card (None for a group's).
+    group: str
+    category: str | None
 
 
 class Choices(TypedDict):

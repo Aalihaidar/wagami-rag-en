@@ -88,17 +88,24 @@ flowchart TD
 |---|---|
 | `GET /` | the guest chat page |
 | `POST /session` | start a conversation → `{"session_id": ...}` |
-| `POST /chat` | `{"session_id", "message"}` → `{"session_id", "answer", "cited_items", "choices"}` |
+| `POST /chat` | `{"session_id", "message", "browse"?}` → `{"session_id", "answer", "cited_items", "choices"}` |
 | `POST /chat/stream` | same request; server-sent events `delta` (text as it is written), `done` (final answer + cited items), `error` |
 | `DELETE /session/{session_id}` | end a conversation and drop its history |
 | `GET /healthz` | liveness probe |
 
 Each entry of `cited_items` has `id`, `slug`, `name`, `description`, `ingredients`,
 `price_gbp` and `image`. `choices` is `null` except for a reply that lists menu groups or
-categories, where it holds `intro`, `outro` and `cards` (`name`, `images`) so the page can show a
-picture card per name between the two sentences instead of a bullet list (`answer` still has the
-whole text, list included). `cited_items` belongs to that answer alone: the dishes it names (or a
-listing shows), and empty when it names none.
+categories, where it holds `intro`, `outro` and `cards` (`name`, `image`, `group`, `category`) so
+the page can show a picture card per name between the two sentences instead of a bullet list
+(`answer` still has the whole text, list included). `cited_items` belongs to that answer alone:
+the dishes it names (or a listing shows), and empty when it names none.
+
+Every card on the chat page can be clicked instead of typing (the magnifier on its picture zooms
+it instead), and the reply simply appears -- the question the click sends is not shown as a
+guest message, though it is saved to the conversation history. A group's card lists its
+categories and a category's card lists its items: the page sends a readable `message` plus `"browse": {"group", "category"}` (from the card, `category` is
+`null` for a group), and the server answers that browse from the menu catalog with no model call.
+A dish's card sends "Tell me about <name>" as an ordinary message.
 
 ## Menu images
 

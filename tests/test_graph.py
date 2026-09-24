@@ -784,6 +784,81 @@ def test_listing_a_categorys_items_puts_their_cards_in_the_state() -> None:
     assert len(client.calls) == 1  # still only the understanding call
 
 
+# ---- a click on a group or category card is answered without an understanding call (R-15) -------
+
+
+def card_click_graph(client: Any, checkpointer: Any = None) -> Any:
+    return build_graph(
+        retrieval_tool=RetrievalTool(kb=ExplodingKB(), cohere_api_key=""),  # type: ignore[arg-type]
+        category_index=make_carded_index(),
+        groq_client=client,
+        understand_model="m",
+        generation_model="m",
+        checkpointer=checkpointer,
+    )
+
+
+def test_a_category_card_click_lists_its_items_with_no_model_call() -> None:
+    client = FakeGroqClient("NOT CALLED", "NOT CALLED")
+    graph = card_click_graph(client)
+
+    final = graph.invoke(
+        {
+            "question": "Show me cocktails in drinks",
+            "browse": {"group": "drinks", "category": "cocktails"},
+        }
+    )
+
+    assert final["answer"].startswith("Here is everything in cocktails (drinks):")
+    assert [c["name"] for c in final["cited_items"]] == ["Lychee Sangria"]
+    assert client.calls == []
+    assert final["usage"]["total_tokens"] == 0
+
+
+def test_a_group_card_click_lists_its_categories_with_no_model_call() -> None:
+    client = FakeGroqClient("NOT CALLED", "NOT CALLED")
+    graph = card_click_graph(client)
+
+    final = graph.invoke(
+        {"question": "Show me drinks", "browse": {"group": "drinks", "category": None}}
+    )
+
+    assert final["choices"] is not None
+    assert [c["name"] for c in final["choices"]["cards"]] == ["cocktails", "coffee + tea"]
+    assert client.calls == []
+
+
+def test_a_click_on_a_card_the_menu_no_longer_has_goes_through_understanding() -> None:
+    client = FakeGroqClient(
+        understanding_for(intent="menu_browse", browse_category="cocktails"), "NOT CALLED"
+    )
+    graph = card_click_graph(client)
+
+    final = graph.invoke(
+        {"question": "Show me pizza in drinks", "browse": {"group": "drinks", "category": "pizza"}}
+    )
+
+    assert len(client.calls) == 1  # understood like typed text
+    assert final["answer"].startswith("Here is everything in cocktails (drinks):")
+
+
+def test_a_card_click_does_not_steer_the_next_typed_message() -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    client = FakeGroqClient(understanding_for(intent="greeting"), "NOT CALLED")
+    graph = card_click_graph(client, InMemorySaver())
+    config = {"configurable": {"thread_id": "t1"}}
+
+    graph.invoke(
+        {"question": "Show me drinks", "browse": {"group": "drinks", "category": None}},
+        config=config,
+    )
+    final = graph.invoke({"question": "hello", "browse": None}, config=config)
+
+    assert len(client.calls) == 1  # the typed message was understood, not taken as the click
+    assert final["choices"] is None
+
+
 def test_a_list_of_groups_carries_no_cards() -> None:
     graph, _ = direct_route_graph(understanding_for(intent="menu_browse"))
 

@@ -6,6 +6,7 @@ from app.agent.browse import (
     browse_reply,
     direct_answer,
     direct_reply,
+    is_known_pick,
 )
 from app.agent.catalog import MenuCatalog, build_catalog
 from app.agent.prompts import GREETING_REPLY, OFF_TOPIC_REPLY
@@ -316,8 +317,8 @@ def test_the_menu_overview_is_cut_around_its_list_with_a_card_per_group(
     assert answer.choices["intro"] == "Our menu is organised into these categories:"
     assert answer.choices["outro"] == "What kind of these would you like to see?"
     assert answer.choices["cards"] == [
-        {"name": "drinks", "image": "drinks/cover.png"},
-        {"name": "sides", "image": "sides/cover.png"},
+        {"name": "drinks", "image": "drinks/cover.png", "group": "drinks", "category": None},
+        {"name": "sides", "image": "sides/cover.png", "group": "sides", "category": None},
     ]
     assert answer.cards == []  # these are not item cards
 
@@ -331,9 +332,24 @@ def test_a_groups_categories_are_cut_around_the_list_with_a_card_per_category(
     assert answer.choices["intro"] == "In drinks we have these sub-categories:"
     assert answer.choices["outro"] == "Which of these would you like to see?"
     assert answer.choices["cards"] == [
-        {"name": "cocktails", "image": "drinks/cocktails/cover.png"},
-        {"name": "coffee + tea", "image": "drinks/coffee-tea/cover.png"},
-        {"name": "soft drinks", "image": "drinks/soft-drinks/cover.png"},
+        {
+            "name": "cocktails",
+            "image": "drinks/cocktails/cover.png",
+            "group": "drinks",
+            "category": "cocktails",
+        },
+        {
+            "name": "coffee + tea",
+            "image": "drinks/coffee-tea/cover.png",
+            "group": "drinks",
+            "category": "coffee + tea",
+        },
+        {
+            "name": "soft drinks",
+            "image": "drinks/soft-drinks/cover.png",
+            "group": "drinks",
+            "category": "soft drinks",
+        },
     ]
 
 
@@ -382,3 +398,12 @@ def test_an_empty_catalog_has_nothing_to_show_as_cards() -> None:
     answer = browse_answer(MenuCatalog(), None, None)
 
     assert answer.choices is None
+
+
+def test_a_clicked_card_is_known_only_if_its_group_and_category_exist(
+    pictured: MenuCatalog,
+) -> None:
+    assert is_known_pick(pictured, "drinks", None)
+    assert is_known_pick(pictured, "drinks", "cocktails")
+    assert not is_known_pick(pictured, "drinks", "gyoza")  # a category of another group
+    assert not is_known_pick(pictured, "pizza", None)
