@@ -65,9 +65,14 @@ RUN apt-get update \
 # can only be upgraded by upgrading pip itself -- so drop it rather than ship it unused.
 RUN python -m pip uninstall -y pip
 
+# PORT and WEB_CONCURRENCY are read by gunicorn itself (a set PORT makes it bind 0.0.0.0:$PORT;
+# WEB_CONCURRENCY is its worker count), so CMD below needs no shell to expand them. These are
+# the defaults; Render injects its own PORT at runtime, and either can be overridden with -e.
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=8000 \
+    WEB_CONCURRENCY=2
 
 WORKDIR /app
 
@@ -88,9 +93,9 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["python", "-c", "import os,urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\", 8000)}/healthz', timeout=3)"]
 
-# Shell form so ${PORT}/${WEB_CONCURRENCY} expand at container start (Render
-# injects PORT); `exec` replaces the shell so gunicorn is PID 1 and receives
-# signals (graceful shutdown on SIGTERM) directly instead of via a shell parent.
+# Exec (JSON) form: gunicorn runs as PID 1 with no shell in between, so it receives SIGTERM
+# directly and shuts down gracefully (Docker's JSONArgsRecommended check). The bind address and
+# worker count come from PORT and WEB_CONCURRENCY (ENV above), which gunicorn reads itself.
 #
 # --no-control-socket: gunicorn >=25.1 creates a control socket (for the
 # `gunicornc` CLI) at $HOME/.gunicorn/gunicorn.ctl by default. The `app` user's
@@ -99,12 +104,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # boot -- confirmed live on Render. Non-fatal (gunicorn just runs without the
 # socket) but nothing in this container ever runs `gunicornc`, so disable it
 # outright instead of chowning a directory for a feature that's never used.
-CMD exec gunicorn app.main:app \
-    --worker-class uvicorn.workers.UvicornWorker \
-    --workers "${WEB_CONCURRENCY:-2}" \
-    --bind "0.0.0.0:${PORT:-8000}" \
-    --timeout 60 \
-    --graceful-timeout 30 \
-    --no-control-socket \
-    --access-logfile - \
-    --error-logfile -
+CMD ["gunicorn", "app.main:app", \
+     "--worker-class", "uvicorn.workers.UvicornWorker", \
+     "--timeout", "60", \
+     "--graceful-timeout", "30", \
+     "--no-control-socket", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]

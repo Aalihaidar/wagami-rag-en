@@ -121,7 +121,15 @@ Hardening applied: top-level `permissions: contents: read`, per-job
 `timeout-minutes`, `concurrency` with PR-only cancellation,
 `persist-credentials: false` on checkout, and **every action pinned to a full
 commit SHA** with a `# vX.Y.Z` comment. Dependabot's `github-actions`
-ecosystem (§5) bumps both the SHA and the comment.
+ecosystem (§5) bumps both the SHA and the comment. Values from the event
+(branch names, PR titles) reach `run:` scripts only through `env:`, never as
+`${{ }}` inside the script, so a crafted branch name can't inject shell.
+
+Every job in every workflow runs on an **explicit runner image, `ubuntu-26.04`**,
+not `ubuntu-latest`, so the OS changes only in a reviewed PR whose CI shows
+whether it works, never silently when GitHub moves the `latest` label.
+Dependabot does not bump runner labels: moving to the next Ubuntu LTS is a
+manual PR (search `.github/workflows/` for `runs-on:`).
 
 ## 4. Build & deploy — [`workflows/docker.yml`](workflows/docker.yml)
 
