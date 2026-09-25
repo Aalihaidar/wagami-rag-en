@@ -161,14 +161,16 @@ setup this depends on.
 
 ## 5. Dependency automation — [`dependabot.yml`](dependabot.yml)
 
-Four ecosystems, all weekly, all opening PRs against **`develop`**:
+Six ecosystems, all weekly (Monday 04:00 UTC), all opening PRs against **`develop`**:
 
 | Ecosystem | Scans | Notes |
 | --- | --- | --- |
 | `uv` | `pyproject.toml` + `uv.lock` (`/`) | `allow: dependency-type: all` → direct **and** transitive |
-| `docker` | `docker-compose.yml` (`/`) + `docker/Dockerfile.*` (`/docker`) | base images incl. `redis` |
-| `github-actions` | `.github/workflows/*` | keeps SHA pins + comments current |
-| `devcontainers` | `.devcontainer/devcontainer.json` | feature versions |
+| `docker` | `docker/Dockerfile.*` (`/docker`) | `FROM` lines: the python base image and the `uv` image, both digest-pinned |
+| `docker-compose` | `docker-compose.yml` (`/`) | the `redis` service image |
+| `github-actions` | `.github/workflows/*` | keeps SHA pins + version comments current |
+| `devcontainers` | `.devcontainer/devcontainer.json` | feature versions (+ the lock file) |
+| `pre-commit` | `.pre-commit-config.yaml` | hook `rev`s |
 
 - `versioning-strategy: increase-if-necessary` on uv → only raises a
   `pyproject` floor when the current constraint can't satisfy the new version;
@@ -176,6 +178,25 @@ Four ecosystems, all weekly, all opening PRs against **`develop`**:
 - Minor + patch bumps are **grouped** into one PR per ecosystem; **major**
   bumps arrive as individual PRs so each breaking change is reviewed alone.
 - Security updates are grouped separately and ignore the open-PR limit.
+- **Cooldown of 7 days** on every ecosystem: a version update is proposed only
+  once the release has been public for a week, so a compromised or broken
+  release is usually caught upstream first. Security updates are never delayed.
+- The `uv` binary is pulled into both Dockerfiles through its own
+  `FROM ghcr.io/astral-sh/uv:<version>@sha256:… AS uv` stage rather than an
+  image named inside `COPY --from=`, because Dependabot's `docker` ecosystem
+  reads `FROM` lines.
+- The ruff pre-commit hook's `rev` should match ruff in `uv.lock`: its bump
+  (`pre-commit` PR) and ruff's (`uv` group PR) arrive the same Monday, so
+  merge them together.
+- Every label Dependabot and the issue forms apply is defined in
+  [`labels.yml`](labels.yml); GitHub silently drops a label that doesn't exist.
+  Labels are managed there, not in the GitHub UI: a push to `develop` that
+  changes the file syncs it, and **deletes any label not listed** (a PR that
+  changes it gets a dry run showing what would change). Rename with `from_name`
+  to keep a label on the issues and PRs that carry it.
+- Debian packages inside the images are outside Dependabot; the production
+  image runs `apt-get upgrade` at build time so security fixes ship before the
+  base-image digest catches up.
 
 > `develop` must exist (and be the default branch) before Dependabot's first
 > run, or the `target-branch: develop` configs error.
@@ -190,10 +211,12 @@ Four ecosystems, all weekly, all opening PRs against **`develop`**:
 | `CODEOWNERS` | Auto review-request routing (`@Aalihaidar`) |
 | `SECURITY.md` | Private vulnerability reporting policy |
 | `dependabot.yml` | Dependency update automation |
+| `labels.yml` | The repository's labels as code, synced by `workflows/labels.yml` |
 | `pull_request_template.md` | PR checklist (branch flow, lint/type/test, secrets) |
 | `ISSUE_TEMPLATE/` | Issue forms + `config.yml` (blank issues disabled) |
 | `workflows/ci.yml` | Lint, type, test, security, PR-source gate |
 | `workflows/docker.yml` | Production image build + deploy |
+| `workflows/labels.yml` | Syncs `labels.yml` to GitHub on `develop`; dry run on PRs |
 | `copilot-instructions.md`, `instructions/` | Editor tool config (Mermaid) — not CI |
 
 ### Owner / repo slug
@@ -212,8 +235,6 @@ organization, update those three places (and switch `CODEOWNERS` to a team).
 - `step-security/harden-runner` as the first step of each CI job for egress
   auditing.
 - `.github/labeler.yml` + `actions/labeler` for path-based PR labels.
-- `pre-commit` autoupdate (its hooks aren't covered by Dependabot) — e.g. a
-  scheduled `pre-commit autoupdate` PR, or pre-commit.ci.
 - Release automation (`release-please` or `changesets`) once `main` cuts tags.
 - The `production` GitHub Environment (§4) can take a required-reviewer rule
   once there's someone other than the sole maintainer to review a prod
