@@ -226,8 +226,8 @@ uv run pytest --cov=app --cov-report=term  # tests — fake LLM and Weaviate, no
   probes to a running app and flags any reply that complies or leaks the prompt.
 - `notebooks/` — `01` retrieval checks, `02` generation checks, `03` an evaluation
   harness (gold questions, deterministic safety checks, an LLM judge, latency
-  percentiles). `02` and `03` import the app's own prompts and understanding code,
-  so they exercise what actually ships. Re-run `03` after any prompt change.
+  percentiles). `02` and `03` import the app's own pipeline code (prompts,
+  understanding, retrieval, prompt assembly, cards), so they exercise what actually ships. Re-run `03` after any prompt change.
 
 Pre-commit hooks, GitHub Actions CI (lint · type-check · test · dependency audit ·
 Dockerfile scan), and Dependabot are configured. See
