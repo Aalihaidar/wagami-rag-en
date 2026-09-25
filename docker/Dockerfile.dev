@@ -1,5 +1,10 @@
 # docker/Dockerfile.dev
 
+# ghcr.io/astral-sh/uv:0.12.15 — pinned to digest, matching Dockerfile.prod. Its own FROM stage
+# rather than an image named inside COPY --from, so Dependabot's "docker" ecosystem, which reads
+# FROM lines, keeps it current. The last stage below is the one the dev container runs.
+FROM ghcr.io/astral-sh/uv:0.12.15@sha256:62f8c047d0a0e9ece6b53fc63df902585a67a47a7f318ddec4a37db586edc8e3 AS uv
+
 # python:3.14-slim-bookworm — pinned to digest for reproducible builds.
 # Dependabot (see .github/dependabot.yml, "docker" ecosystem) will open PRs
 # to bump this digest automatically; update the human-readable tag alongside it.
@@ -12,8 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# ghcr.io/astral-sh/uv:0.12.1 — pinned to digest for reproducible builds.
-COPY --from=ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded /uv /uvx /usr/local/bin/
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 ENV UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/workspace/.venv \
