@@ -55,33 +55,10 @@
 
   // --- File associations for installed extensions ------------------------
   "files.associations": { "*.env": "dotenv", ".env.example": "dotenv" },
-  "redhat.telemetry.enabled": false,
+  "redhat.telemetry.enabled": false
 
-  // --- Project vocabulary for the spell checker -------------------------
-  "cSpell.words": [
-    "checkpointing",
-    "cohere",
-    "debugpy",
-    "devcontainer",
-    "dotenv",
-    "gunicorn",
-    "Haidar",
-    "katsu",
-    "kcal",
-    "langchain",
-    "langgraph",
-    "mypy",
-    "plist",
-    "pnum",
-    "pstr",
-    "pydantic",
-    "pyproject",
-    "pytest",
-    "repomix",
-    "usecwd",
-    "uvicorn",
-    "vectorizer",
-    "wagami",
-    "weaviate"
-  ]
+  // Spell-checker vocabulary lives in cspell.json at the repo root, not here --
+  // that file is also picked up by the standalone `cspell` CLI (e.g. for a future
+  // CI check), and the extension's "Add Words to Dictionary" quick-fix targets it
+  // automatically.
 }

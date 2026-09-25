@@ -36,7 +36,10 @@
         "github.vscode-github-actions",
         "mikestead.dotenv",
         "rangav.vscode-thunder-client",
-        "streetsidesoftware.code-spell-checker"
+        "streetsidesoftware.code-spell-checker",
+        "davidanson.vscode-markdownlint",
+        "ms-edgedevtools.vscode-edge-devtools",
+        "ms-python.mypy-type-checker"
       ],
       "settings": {
         "remote.containers.enableWSLg": false,

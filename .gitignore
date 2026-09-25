@@ -92,3 +92,9 @@ wagami-rag-en-code.xml
 
 # Knowledge-base corpus + dish images — kept local, not committed
 data/
+
+# App & deployment planning doc — kept local, not committed
+docs/APP_AND_DEPLOYMENT_PLAN.md
+
+# LLM rules spec — kept local, not committed
+docs/LLM_RULES.md

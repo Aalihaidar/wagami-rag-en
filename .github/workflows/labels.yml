@@ -1,0 +1,46 @@
+name: Labels
+
+# Syncs .github/labels.yml to the repository's labels (see that file's header).
+#
+# Applied only from `develop`, the default branch: labels are repository-wide, and `main` lags
+# `develop`, so syncing from `main` too would put back an older label set after every release.
+# A pull request that changes the file gets a dry run, whose log shows what merging it would
+# create, update or delete.
+on:
+  push:
+    branches: [develop]
+    paths:
+      - .github/labels.yml
+      - .github/workflows/labels.yml
+  pull_request:
+    paths:
+      - .github/labels.yml
+      - .github/workflows/labels.yml
+  workflow_dispatch:
+
+# Least privilege by default; only the sync job below may write (labels are an Issues API).
+permissions:
+  contents: read
+
+concurrency:
+  group: labels-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Sync labels
+        uses: crazy-max/ghaction-github-labeler@548a7c3603594ec17c819e1239f281a3b801ab4d # v6.0.0
+        with:
+          yaml-file: .github/labels.yml
+          # Applied only from develop; a pull request, or a manual run on any other branch, only
+          # previews the change.
+          dry-run: ${{ github.ref != 'refs/heads/develop' }}

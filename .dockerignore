@@ -1,0 +1,43 @@
+# Keep the prod build context (docker/Dockerfile.prod) small and free of
+# anything that shouldn't reach a running container: secrets, the data
+# corpus (gitignored anyway, but belt-and-suspenders if ever run locally
+# outside CI), dev/test-only files, and VCS/editor cruft.
+
+.git/
+.github/
+
+# Secrets — never bake into an image layer
+.env
+.env.*
+!.env.example
+
+# Data corpus — gitignored, demo data, not licensed for this repo (README)
+data/
+
+# Dev/test-only, not needed at runtime
+tests/
+notebooks/
+docker/Dockerfile.dev
+docker-compose.yml
+.devcontainer/
+.pre-commit-config.yaml
+
+# Docs — not needed inside the image
+docs/
+*.md
+!README.md
+
+# Python/uv/tooling cruft
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor/OS cruft
+.vscode/
+.idea/
+.DS_Store

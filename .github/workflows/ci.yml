@@ -22,12 +22,15 @@ concurrency:
 jobs:
   verify-pr-source:
     if: github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - name: Ensure PRs into main only come from develop
+        # The branch name comes in through env, never spliced into the script itself: whoever
+        # opens a PR chooses it, and it can contain shell syntax (script injection).
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
-          HEAD_REF="${{ github.event.pull_request.head.ref }}"
           if [ "$HEAD_REF" != "develop" ]; then
             echo "❌ PRs into 'main' are only allowed from 'develop' (got '$HEAD_REF')."
             exit 1
@@ -38,7 +41,7 @@ jobs:
   # actually present so the jobs that need those paths activate on their own
   # once they land, instead of failing every run until then.
   detect:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       has_app: ${{ steps.paths.outputs.has_app }}
@@ -58,13 +61,13 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
           cache-suffix: lint
@@ -74,13 +77,13 @@ jobs:
 
   typecheck:
     needs: detect
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
           cache-suffix: typecheck
@@ -96,31 +99,31 @@ jobs:
   test:
     needs: detect
     if: needs.detect.outputs.has_tests == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
           cache-suffix: test
       - run: uv sync --frozen
       - run: uv run pytest --cov=app --cov-report=xml
-      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
   security:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
           cache-suffix: security
@@ -130,7 +133,7 @@ jobs:
   dockerfile-check:
     needs: detect
     if: needs.detect.outputs.has_prod_dockerfile == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -147,7 +150,7 @@ jobs:
   ci-passed:
     if: always()
     needs: [verify-pr-source, detect, lint, typecheck, test, security, dockerfile-check]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - name: Check all required jobs succeeded

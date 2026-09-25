@@ -1,0 +1,1010 @@
+/* Light palette (default). Dark palette redefines the same tokens below under
+   prefers-color-scheme -- no color is ever defined only inside that block.
+   Built around the requested #016b5d primary (a deep emerald/teal) -- neutrals
+   given a cool, slightly green-gray undertone rather than a warm one so they
+   read as one deliberate system with the accent instead of clashing against
+   it. Error red is kept deliberately separate from the accent hue (a
+   universal, provider-agnostic convention for error states), and the focus
+   ring stays blue so it's visibly distinct against accent-colored controls,
+   not just a duller version of the same color. Both pairs checked at
+   WCAG AA (>=4.5:1) for text-on-background and text-on-accent. */
+:root {
+  --bg: #f4f7f6;
+  --surface: #ffffff;
+  --border: #dbe4e1;
+  --text: #16211d;
+  --text-muted: #5c6b67;
+  --accent: #016b5d;
+  --accent-text: #ffffff;
+  --assistant-bubble: #ffffff;
+  --guest-bubble: #016b5d;
+  --guest-bubble-text: #ffffff;
+  --error-bubble: #fdecea;
+  --error-border: #c0392b;
+  --focus-ring: #2f6fb3;
+  --dietary-bg: #e3f5ef;
+  --dietary-text: #016b5d;
+  --allergen-contains-bg: #fdecea;
+  --allergen-contains-text: #c0392b;
+  --allergen-may-bg: #fdf3e3;
+  --allergen-may-text: #8a5a00;
+  --radius: 14px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  /* Side gutter shared by header, log and composer -- tighter on small phones. */
+  --gutter: 16px;
+  --avatar-size: 32px;
+  --avatar-offset: 40px; /* avatar + 8px gap */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1613;
+    --surface: #16211e;
+    --border: #2b3733;
+    --text: #eef3f1;
+    --text-muted: #9db0ac;
+    --accent: #1f9d85;
+    --accent-text: #06231e;
+    --assistant-bubble: #16211e;
+    --guest-bubble: #1f9d85;
+    --guest-bubble-text: #06231e;
+    --error-bubble: #3a2020;
+    --error-border: #ef5350;
+    --focus-ring: #7db2e8;
+    --dietary-bg: #123832;
+    --dietary-text: #6fe0c6;
+    --allergen-contains-bg: #3a2020;
+    --allergen-contains-text: #ff8a80;
+    --allergen-may-bg: #3a2f14;
+    --allergen-may-text: #ffd479;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Root size scales gently with the screen (16px on phones, up to 20px on large monitors);
+   everything below is in rem/%, so type, spacing and the chat column all grow together. The
+   16px floor also keeps the message input at >=16px, which stops iOS zooming on focus. */
+html {
+  font-size: clamp(16px, 13.6px + 0.4vw, 20px);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  /* viewport-fit=cover lets the page draw under a landscape notch/rounded corner -- keep
+     content clear of it. */
+  padding-inline: var(--safe-left) var(--safe-right);
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh; /* fallback for browsers without dvh */
+  min-height: 100dvh;
+  /* Column width follows the root font size, so it widens on big screens instead of staying a
+     narrow strip; on anything smaller than that it simply fills the screen. */
+  max-width: 46rem;
+  margin: 0 auto;
+  background: var(--bg);
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(12px + var(--safe-top)) var(--gutter) 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.app-header__title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 0;
+  text-align: center;
+}
+
+.message-log {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--gutter);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.message {
+  max-width: 82%;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  /* `anywhere` (unlike the older word-wrap/`break-word`) also lowers the bubble's min-content
+     width, so one long unbroken string can't force the bubble wider than the screen. */
+  overflow-wrap: anywhere;
+  opacity: 0;
+  transform: translateY(4px);
+  animation: message-in 180ms ease-out forwards;
+}
+
+@keyframes message-in {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message--assistant {
+  align-self: flex-start;
+  background: var(--assistant-bubble);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 4px;
+}
+
+/* Bot avatar beside every assistant bubble (and the typing indicator, so it doesn't pop in
+   only when the answer lands). Drawn as a pseudo-element from one image file, so it needs no
+   markup or JS and isn't read out by screen readers -- swap the look by replacing
+   static/img/bot-avatar.svg (and bump the ?v= below -- the server sends no cache headers for
+   images, so browsers keep the old picture until the URL changes). The bubble's left margin
+   reserves the avatar's column. */
+.message--assistant,
+.typing-indicator {
+  position: relative;
+  margin-left: var(--avatar-offset);
+}
+
+.message--assistant::before,
+.typing-indicator::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: calc(-1 * var(--avatar-offset));
+  width: var(--avatar-size);
+  height: var(--avatar-size);
+  border-radius: 50%;
+  background: url("../img/bot-avatar.svg?v=2") center / cover no-repeat;
+}
+
+.message--guest {
+  align-self: flex-end;
+  background: var(--guest-bubble);
+  color: var(--guest-bubble-text);
+  border-bottom-right-radius: 4px;
+}
+
+.message--error {
+  align-self: flex-start;
+  background: var(--error-bubble);
+  border: 1px solid var(--error-border);
+}
+
+.message--system {
+  align-self: center;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  border: none;
+  padding: 4px 10px;
+}
+
+.item-cards {
+  display: grid;
+  /* min(100%, ...) so a single column can never be wider than the bubble it sits in. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 9.5rem), 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.item-card {
+  /* The containing block of the name button's stretched click area (.card-ask::after). */
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.item-card__image-frame {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+}
+
+/* `contain`, not `cover`: the whole photo is shown, never cropped -- a tall bottle or a wide
+   plate is scaled down to fit the frame instead of losing its top and bottom. The photos have
+   transparent or plain backgrounds, so the spare space around them reads as card, not as bars. */
+.item-card__image {
+  width: 100%;
+  height: 100%;
+  padding: 6px;
+  object-fit: contain;
+  display: block;
+  transition: transform 0.2s ease;
+}
+
+.item-card:hover .item-card__image,
+.item-card:has(.card-ask:focus-visible) .item-card__image {
+  transform: scale(1.05);
+}
+
+.item-card__body {
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.item-card__name {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text);
+  white-space: normal;
+}
+
+.item-card__description {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+.item-card__ingredients {
+  margin: 0;
+  font-size: 0.75rem;
+  font-style: italic;
+  color: var(--text-muted);
+  line-height: 1.35;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+/* Dietary tags and allergens on a gallery card (rule R-17): the detail view's pills, smaller. */
+.item-card__pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.item-card__pill {
+  padding: 1px 7px;
+  font-size: 0.68rem;
+}
+
+.item-card__price {
+  margin: 2px 0 0;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--accent);
+  white-space: normal;
+}
+
+/* A single-dish answer (rules R-16, C-26), top to bottom: the assistant's short written answer,
+   a large picture, then everything the dish's row holds as a panel -- header (name + price),
+   badges, description, then titled sections: a nutrition grid, allergen pills, ingredient chips
+   and a details list. Only used when the answer cites exactly one dish -- a comparison or a
+   listing still uses the gallery of small .item-cards above. */
+.item-detail__answer {
+  margin: 0;
+  padding: 12px 16px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.item-detail__image-frame {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  background: var(--border);
+}
+
+.item-detail__image {
+  width: 100%;
+  height: 100%;
+  padding: 8px;
+  object-fit: contain; /* the whole photo, never cropped -- same as .item-card__image */
+  display: block;
+}
+
+/* Fills the whole bubble edge to edge, same reasoning as .message:has(> .choice-cards). Not
+   `overflow: hidden`: that would also clip the bot avatar, which is drawn outside the bubble's
+   left edge (.message--assistant::before). The picture sits below the answer, away from the
+   bubble's rounded corners, so nothing needs clipping -- and when there is no answer text above
+   it, the picture rounds its own top corners instead. */
+.message:has(> .item-detail__image-frame) {
+  width: 100%;
+  padding: 0;
+  white-space: normal;
+}
+
+.item-detail__image-frame:first-child {
+  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
+}
+
+.item-detail__body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.item-detail__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.item-detail__name {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--text);
+}
+
+.item-detail__price {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.item-detail__pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.item-detail__tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.35;
+  background: var(--dietary-bg);
+  color: var(--dietary-text);
+}
+
+.item-detail__tag--contains {
+  background: var(--allergen-contains-bg);
+  color: var(--allergen-contains-text);
+}
+
+.item-detail__tag--may-contain {
+  background: var(--allergen-may-bg);
+  color: var(--allergen-may-text);
+}
+
+/* Ingredients: quiet outlined chips, so the coloured ones above keep their meaning. */
+.item-detail__tag--plain {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.item-detail__description {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.item-detail__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.item-detail__section-title {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.item-detail__nutrition {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));
+  gap: 6px;
+}
+
+.item-detail__nutrient {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.item-detail__nutrient--energy {
+  border-color: var(--accent);
+}
+
+.item-detail__nutrient-value {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.item-detail__nutrient-unit {
+  margin-left: 2px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.item-detail__nutrient-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.item-detail__allergens {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.item-detail__allergen-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.item-detail__allergen-label {
+  min-width: 6.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.item-detail__note {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.item-detail__list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.item-detail__list-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: 0.9rem;
+}
+
+.item-detail__list-row + .item-detail__list-row {
+  border-top: 1px dashed var(--border);
+}
+
+.item-detail__list-label {
+  color: var(--text-muted);
+}
+
+.item-detail__list-value {
+  margin: 0;
+  font-weight: 600;
+  text-align: right;
+  color: var(--text);
+}
+
+/* A list of groups or categories, laid out between the reply's opening sentence and its closing
+   question in place of the bullet list. */
+.message__part {
+  white-space: pre-wrap;
+}
+
+/* A bubble that lists groups or categories takes its full width (up to .message's max-width)
+   instead of shrinking to its opening sentence, so the cards get the same room -- and the same
+   size -- whatever that sentence says. */
+.message:has(> .choice-cards) {
+  width: 100%;
+}
+
+.choice-cards {
+  list-style: none;
+  margin: 10px 0;
+  padding: 0;
+  display: grid;
+  /* Fixed-size columns, so a group's card and a category's card are the same size; min(100%, ...)
+     so a single column can never be wider than the bubble it sits in. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 9rem), 9.5rem));
+  gap: 10px;
+}
+
+.choice-card {
+  /* The containing block of the name button's stretched click area (.card-ask::after). */
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* The pictures sit inside the card with a margin of surface colour all round, not flush with
+     its edge. */
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+/* The group's or category's cover picture, shown whole at its own shape (the covers are
+   square) -- no fixed frame, so nothing is cropped. flex-shrink: 0 stops the card's column from
+   squashing it. */
+.choice-card__picture-frame {
+  position: relative;
+  display: block;
+  flex-shrink: 0;
+  width: 100%;
+  background: var(--border);
+  /* Follows the card's own corner (radius minus the padding), so the frame reads as inset. */
+  border-radius: calc(var(--radius) - 8px);
+  overflow: hidden;
+}
+
+.choice-card__picture {
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  display: block;
+  transition: transform 0.2s ease;
+}
+
+.choice-card:hover .choice-card__picture,
+.choice-card:has(.card-ask:focus-visible) .choice-card__picture {
+  transform: scale(1.05);
+}
+
+/* The name sits at the bottom, centred. `margin-top: auto` keeps it on the card's bottom edge
+   when a neighbour in the same row is taller (its name wraps to two lines), and a card with no
+   pictures is just its name. */
+.choice-card__name {
+  margin: auto 0 0;
+  padding: 0 4px 2px;
+  text-align: center;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text);
+  white-space: normal;
+}
+
+/* A card is one click target (rule R-15): its name is a button whose ::after covers the whole
+   card, so a click on the picture or the text asks about it. The zoom button sits above that. */
+/* :where() keeps the reset at zero specificity, so the name's own font, padding and alignment
+   (.item-card__name, .choice-card__name) still apply. */
+:where(.card-ask) {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.card-ask::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.card-ask:focus-visible {
+  outline: none;
+}
+
+.item-card,
+.choice-card {
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.item-card:hover,
+.choice-card:hover {
+  border-color: var(--accent);
+}
+
+.item-card:has(.card-ask:focus-visible),
+.choice-card:has(.card-ask:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.card-zoom {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: zoom-in;
+}
+
+.card-zoom svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+.card-zoom:hover,
+.card-zoom:focus-visible {
+  background: rgba(0, 0, 0, 0.75);
+}
+
+.typing-indicator {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  background: var(--assistant-bubble);
+  border: 1px solid var(--border);
+}
+
+.typing-indicator__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  /* A wave, not a bounce: every dot runs the same smooth, continuous up-and-down curve (no
+     resting phase), each a fraction of a cycle behind the one before it. The negative delays
+     start the wave already in motion, so all three dots are moving from the first frame instead
+     of the later ones waiting their turn. */
+  animation: typing-wave 0.9s infinite ease-in-out;
+  animation-delay: -0.24s;
+}
+
+.typing-indicator__dot:nth-child(2) {
+  animation-delay: -0.12s;
+}
+
+.typing-indicator__dot:nth-child(3) {
+  animation-delay: 0s;
+}
+
+@keyframes typing-wave {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translateY(-6px);
+    opacity: 1;
+  }
+}
+
+/* The same wave, smaller, for people whose system asks for reduced motion. "Reduce" means less
+   movement, not none: a fade alone read as the dots merely changing colour, and a loading
+   indicator that does not move is not much of one. It is used only under prefers-reduced-motion
+   (see the end of this file). */
+@keyframes typing-wave-gentle {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.composer-area {
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: 10px var(--gutter) calc(10px + var(--safe-bottom));
+  position: sticky;
+  bottom: 0;
+}
+
+.composer {
+  display: flex;
+  gap: 8px;
+}
+
+.composer__input {
+  flex: 1 1 auto;
+  /* The fix for controls vanishing on phones: a text input's automatic minimum width is its
+     intrinsic ~20-character size, so without this it refused to shrink and shoved the Send
+     button past the right edge of any screen under ~375px. */
+  min-width: 0;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 1rem;
+  text-overflow: ellipsis;
+}
+
+.composer__button {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 999px;
+  padding: 0 18px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.composer__button--send {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.composer__button--send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.composer__button--stop {
+  background: transparent;
+  border: 1px solid var(--error-border);
+  color: var(--error-border);
+}
+
+/* Moved down from the header (Section 4) so it stays reachable via the sticky composer-area
+   without scrolling back up once a conversation runs long -- icon-only, same affordance as
+   the lightbox's close button, since the composer row has far less room than the header did. */
+.composer__button--new-chat {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1.2rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.composer__button--new-chat:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.privacy-note {
+  margin: 8px 0 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* [hidden] must win over the unconditional `display: flex` below -- otherwise this class's
+   own specificity beats the UA stylesheet's `[hidden] { display: none }` by cascade order
+   (author styles apply after user-agent styles at equal specificity), and the lightbox stays
+   in the layout -- invisible (fully transparent background isn't the issue; it's *present*
+   and catches pointer events) -- and silently intercepts clicks across the whole page even
+   while `hidden` is set. Confirmed live: the "New chat" button was unclickable until this
+   rule was added. */
+.lightbox[hidden] {
+  display: none;
+}
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  padding: 24px;
+}
+
+.lightbox__image {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+}
+
+.lightbox__close {
+  position: absolute;
+  top: calc(12px + var(--safe-top));
+  right: calc(16px + var(--safe-right));
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* ---- Responsive breakpoints. The base rules above are the small-phone layout; these adapt it
+   outward (phones -> tablets -> desktop) and for unusually short screens. ---- */
+
+/* Phones: tighter gutters, and item cards get the full width of the log so two fit side by side
+   instead of one oversized card inside a narrow 82% bubble. */
+@media (max-width: 600px) {
+  :root {
+    --gutter: 12px;
+  }
+
+  .message:has(> .item-cards, > .choice-cards, > .item-detail__image-frame) {
+    max-width: calc(100% - var(--avatar-offset));
+  }
+
+  .item-cards,
+  .choice-cards {
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr));
+  }
+}
+
+/* Very small phones (320-360px): give the input every spare pixel. */
+@media (max-width: 380px) {
+  .composer {
+    gap: 6px;
+  }
+
+  .composer__button {
+    padding: 0 14px;
+  }
+}
+
+/* Touch screens: 44px is the minimum comfortable tap target. */
+@media (pointer: coarse) {
+  .composer__button--new-chat {
+    width: 44px;
+    height: 44px;
+  }
+
+  .composer__input,
+  .composer__button--send,
+  .composer__button--stop {
+    min-height: 44px;
+  }
+}
+
+/* Desktop / large monitors: frame the chat column so it reads as an app, not a strip of page. */
+@media (min-width: 900px) {
+  .page {
+    border-inline: 1px solid var(--border);
+  }
+
+  .message {
+    max-width: 78%;
+  }
+}
+
+/* Short screens (phones in landscape): reclaim vertical space so the conversation stays
+   visible -- otherwise header + composer + privacy note can fill the whole screen. */
+@media (max-height: 480px) {
+  .app-header {
+    padding-top: calc(6px + var(--safe-top));
+    padding-bottom: 6px;
+  }
+
+  .composer-area {
+    padding-top: 6px;
+    padding-bottom: calc(6px + var(--safe-bottom));
+  }
+
+  .privacy-note {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+
+  /* Smaller (4px, not 6px) and slower (1.2s, not 0.9s), with the same left-to-right stagger
+     scaled to the longer cycle. */
+  .typing-indicator__dot {
+    animation-name: typing-wave-gentle;
+    animation-duration: 1.2s;
+    animation-delay: -0.32s;
+  }
+
+  .typing-indicator__dot:nth-child(2) {
+    animation-delay: -0.16s;
+  }
+
+  .typing-indicator__dot:nth-child(3) {
+    animation-delay: 0s;
+  }
+
+  .item-card__image,
+  .choice-card__picture {
+    transition: none;
+  }
+}

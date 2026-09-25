@@ -1,0 +1,113 @@
+# docker/Dockerfile.prod
+#
+# Multi-stage: build a venv with uv (app/ installed into it as a real wheel,
+# templates/static included — hatchling bundles the whole package tree) in a
+# throwaway stage, then copy only /opt/venv into a minimal, non-root final
+# image. Keeps the runtime image free of build tools, uv itself, and the git
+# history/notebooks/scripts that ship in the repo but have no reason to be in
+# a running container.
+
+# ghcr.io/astral-sh/uv:0.12.15 — pinned to digest, matching Dockerfile.dev. Its own FROM stage
+# rather than an image named inside COPY --from, so Dependabot's "docker" ecosystem, which reads
+# FROM lines, keeps it current like the base image below.
+FROM ghcr.io/astral-sh/uv:0.12.19@sha256:04d046b13e60d6bcec73cbc5e1cad25d680dea90c8573340950a0ac2d1aef424 AS uv
+
+# python:3.14-slim-bookworm — same pinned digest as docker/Dockerfile.dev, kept
+# in sync by Dependabot's "docker" ecosystem (.github/dependabot.yml).
+FROM python:3.14-slim-bookworm@sha256:82bc3c539b8813ada9d68c63b40158fa002f7f33de9bf3312a3dfdc0620dff56 AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+ENV UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_COMPILE_BYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /build
+
+# Dependencies first (cache-friendly layer) — no app code yet, so editing
+# app/ doesn't invalidate this layer.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-default-groups --no-install-project --no-editable
+
+# Now the project itself. --no-editable installs a real wheel into the venv
+# rather than a .pth redirect back to /build, which won't exist in the final
+# stage. README.md/LICENSE are required here too, not just app/ — hatchling
+# (pyproject.toml's build backend) reads `readme`/`license-files` from
+# pyproject.toml and fails the wheel build if either is missing (confirmed
+# directly: dropping either produces a hatchling metadata-validation error).
+COPY app ./app
+COPY README.md LICENSE ./
+RUN uv sync --frozen --no-default-groups --no-editable
+
+# --- final stage -------------------------------------------------------
+FROM python:3.14-slim-bookworm@sha256:82bc3c539b8813ada9d68c63b40158fa002f7f33de9bf3312a3dfdc0620dff56 AS final
+
+RUN groupadd --system --gid 1000 app \
+    && useradd --system --uid 1000 --gid app --home-dir /app --no-create-home app
+
+# Debian security updates published since the pinned base image was built. The digest above only
+# moves when the upstream image is rebuilt and Dependabot bumps it, which can lag Debian's own
+# fixes by days (the image scan found tzdata 2026b in the base while bookworm-security already
+# had 2026c, DLA-4792-1). Upgrading here ships those fixes on every build in the meantime.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# Nothing at runtime needs a package installer: the app runs from /opt/venv, which has no pip
+# of its own, and the venv was fully built in the stage above. The base image's pip also
+# bundles its own copies of msgpack and setuptools, which vulnerability scanners flag and which
+# can only be upgraded by upgrading pip itself -- so drop it rather than ship it unused.
+RUN python -m pip uninstall -y pip
+
+# PORT and WEB_CONCURRENCY are read by gunicorn itself (a set PORT makes it bind 0.0.0.0:$PORT;
+# WEB_CONCURRENCY is its worker count), so CMD below needs no shell to expand them. These are
+# the defaults; Render injects its own PORT at runtime, and either can be overridden with -e.
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=8000 \
+    WEB_CONCURRENCY=2
+
+WORKDIR /app
+
+# Just the venv — app/ was installed into it as a real (non-editable) wheel
+# by the builder stage, so /opt/venv/lib/python*/site-packages/app is the
+# code that actually runs; copying the app/ source tree again here would be
+# dead weight that Python never imports (confirmed: with no source tree
+# present, `import app.main` still resolves to the site-packages copy).
+COPY --from=builder --chown=app:app /opt/venv /opt/venv
+
+# data/images is gitignored and never
+# part of the build context — app/main.py's static mount already tolerates
+# the directory being absent (check_dir=False).
+
+USER app
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["python", "-c", "import os,urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\", 8000)}/healthz', timeout=3)"]
+
+# Exec (JSON) form: gunicorn runs as PID 1 with no shell in between, so it receives SIGTERM
+# directly and shuts down gracefully (Docker's JSONArgsRecommended check). The bind address and
+# worker count come from PORT and WEB_CONCURRENCY (ENV above), which gunicorn reads itself.
+#
+# --no-control-socket: gunicorn >=25.1 creates a control socket (for the
+# `gunicornc` CLI) at $HOME/.gunicorn/gunicorn.ctl by default. The `app` user's
+# HOME (/app) isn't writable by it (only /opt/venv is chowned above), so this
+# would otherwise log a "Control server error: Permission denied" on every
+# boot -- confirmed live on Render. Non-fatal (gunicorn just runs without the
+# socket) but nothing in this container ever runs `gunicornc`, so disable it
+# outright instead of chowning a directory for a feature that's never used.
+CMD ["gunicorn", "app.main:app", \
+     "--worker-class", "uvicorn.workers.UvicornWorker", \
+     "--timeout", "60", \
+     "--graceful-timeout", "30", \
+     "--no-control-socket", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]

@@ -1,0 +1,62 @@
+# The repository's labels, as code. .github/workflows/labels.yml syncs this file to GitHub
+# whenever it changes on `develop`: labels here are created or updated, and a label that exists
+# on GitHub but not here is DELETED (and removed from every issue and PR that carries it). Add
+# a label here rather than in the GitHub UI, or the next sync removes it. A pull request that
+# changes this file gets a dry run first, whose log lists exactly what the merge would change.
+#
+# To rename a label and keep it on the issues and PRs that carry it, set `from_name` to the old
+# name instead of deleting one entry and adding another.
+#
+# Colors are 6-digit hex without "#".
+
+# --- Issue triage (GitHub's defaults, as the repository was created with them) -------------------
+- name: "bug"
+  color: "d73a4a"
+  description: "Something isn't working"
+- name: "enhancement"
+  color: "a2eeef"
+  description: "New feature or request"
+- name: "documentation"
+  color: "0075ca"
+  description: "Improvements or additions to documentation"
+- name: "accessibility"
+  color: "f143ab"
+  description: "Barrier affecting people with disabilities"
+- name: "question"
+  color: "d876e3"
+  description: "Further information is requested"
+- name: "duplicate"
+  color: "cfd3d7"
+  description: "This issue or pull request already exists"
+- name: "invalid"
+  color: "e4e669"
+  description: "This doesn't seem right"
+- name: "wontfix"
+  color: "ffffff"
+  description: "This will not be worked on"
+- name: "good first issue"
+  color: "7057ff"
+  description: "Good for newcomers"
+- name: "help wanted"
+  color: "008672"
+  description: "Extra attention is needed"
+
+# --- Dependency updates (the labels .github/dependabot.yml puts on its PRs) ----------------------
+- name: "dependencies"
+  color: "0366d6"
+  description: "Automated dependency update opened by Dependabot"
+- name: "python"
+  color: "3572a5"
+  description: "Python packages: pyproject.toml and uv.lock"
+- name: "docker"
+  color: "1d63ed"
+  description: "Docker images: docker/Dockerfile.* and docker-compose.yml"
+- name: "ci"
+  color: "2088ff"
+  description: "GitHub Actions workflows in .github/workflows"
+- name: "devcontainer"
+  color: "5319e7"
+  description: "Dev container features in .devcontainer"
+- name: "pre-commit"
+  color: "fab040"
+  description: "pre-commit hook versions in .pre-commit-config.yaml"

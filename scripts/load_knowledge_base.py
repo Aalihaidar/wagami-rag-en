@@ -74,6 +74,12 @@ def create_collection(client: WeaviateClient) -> None:
     client.collections.create(
         name="KnowledgeBase",
         vector_config=vector_config,
+        # index_null_state=True: without it, a server-side filter for "this property is
+        # unset" (e.g. abv_percent IS NULL, for an alcohol-free search) fails at query time
+        # with "Nullstate must be indexed to be filterable" instead of just returning no
+        # matches -- found by 03_evaluation.ipynb exercising that filter end-to-end for the
+        # first time.
+        inverted_index_config=wvc.Configure.inverted_index(index_null_state=True),
         properties=[
             wvc.Property(
                 name="item_type",
@@ -85,6 +91,13 @@ def create_collection(client: WeaviateClient) -> None:
             wvc.Property(name="name", data_type=wvc.DataType.TEXT, skip_vectorization=True),
             wvc.Property(name="slug", data_type=wvc.DataType.TEXT, skip_vectorization=True),
             wvc.Property(name="description", data_type=wvc.DataType.TEXT, skip_vectorization=True),
+            # Derived, not source-verified -- see data/add_ingredients_field.py's own
+            # docstring. Not folded into embedding_text/VECTORIZED_PROPERTY.
+            wvc.Property(
+                name="ingredients",
+                data_type=wvc.DataType.TEXT_ARRAY,
+                skip_vectorization=True,
+            ),
             wvc.Property(name="category", data_type=wvc.DataType.TEXT, skip_vectorization=True),
             wvc.Property(
                 name="category_slug",
@@ -97,10 +110,7 @@ def create_collection(client: WeaviateClient) -> None:
                 data_type=wvc.DataType.TEXT_ARRAY,
                 skip_vectorization=True,
             ),
-            # --- price: a single per-item GBP figure. Some rows were filled at
-            # transform time with a category-median estimate rather than a real
-            # scraped price; that per-row provenance is no longer tracked in the
-            # schema -- all prices are now treated the same.
+            # --- price: a single per-item GBP figure.
             wvc.Property(name="price_gbp", data_type=wvc.DataType.NUMBER, skip_vectorization=True),
             # --- nutrition: per-serving values only. Wagami's own data also
             # carries per-100g and %GDA for each of these, kept in the source
