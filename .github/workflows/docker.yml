@@ -4,9 +4,11 @@ on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
-    # main -> production, develop -> staging. Direct pushes to either are
-    # blocked by the repo's rulesets (.github/CONTRIBUTING.md §2), so a green
-    # CI run here always means a PR just merged, never a stray push.
+    # main -> production, develop -> staging. This filter matches the CI run's
+    # head branch, so it also passes CI runs for a pull request whose head is
+    # develop (the develop -> main release PR); build-and-push below only acts
+    # on CI runs for a push, which on these ruleset-protected branches
+    # (.github/CONTRIBUTING.md §2) always means a merged PR.
     branches: [main, develop]
   workflow_dispatch:
     inputs:
@@ -23,7 +25,10 @@ on:
         default: false
 
 concurrency:
-  group: docker-${{ github.ref }}
+  # One queue per target branch. Under workflow_run, github.ref is always the
+  # default branch, so keying on it put staging and production builds in one
+  # group, where a newer pending run replaces an older pending one.
+  group: docker-${{ github.event.workflow_run.head_branch || github.ref_name }}
   cancel-in-progress: false
 
 # Least privilege at the top; the build job widens its own scopes below.
@@ -56,10 +61,16 @@ jobs:
       packages: write          # push image to GHCR
       security-events: write   # upload Trivy SARIF
       id-token: write          # keyless signing / provenance attestation
+    # A workflow_run build needs a green CI run for a push (a merge) made in
+    # this repository. CI runs for pull requests are skipped: the release PR's
+    # head is develop, so its CI run would otherwise rebuild and redeploy the
+    # commit develop's own merge already shipped.
     if: >
       needs.detect.outputs.has_prod_dockerfile == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
-       github.event.workflow_run.conclusion == 'success')
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
       image-tags: ${{ steps.meta.outputs.tags }}
@@ -70,21 +81,40 @@ jobs:
       target-branch: ${{ steps.target.outputs.branch }}
 
     steps:
+      # Under workflow_run, github.sha and github.ref point at the default
+      # branch's latest commit, not the commit CI tested, so a main build
+      # would otherwise check out develop. Build exactly the commit CI passed;
+      # a manual dispatch checks out the ref it was started on.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
           persist-credentials: false
 
-      - name: Resolve target branch
+      - name: Resolve target branch and commit
         id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           # workflow_run doesn't put the triggering branch on github.ref_name
           # (that's always the default branch); workflow_dispatch does.
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            echo "branch=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            branch="$RUN_HEAD_BRANCH"
+            # Checking out a bare SHA leaves a detached HEAD with no branch
+            # refs, and metadata-action's git context cannot infer a ref from
+            # that ("Cannot infer ref from detached HEAD"). Name the tested
+            # commit after its branch, without moving it.
+            git check-ref-format --branch "$branch" > /dev/null
+            git switch --quiet --force-create "$branch"
           else
-            echo "branch=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            branch="$REF_NAME"
           fi
+          {
+            echo "branch=$branch"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
@@ -103,6 +133,9 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
+          # Read the commit from the checkout above, so the sha- tag and the
+          # revision label name the commit that was built, not github.sha.
+          context: git
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest,enable=${{ steps.target.outputs.branch == 'main' }}
@@ -125,7 +158,10 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # A failed cache write (e.g. "failed to reserve cache" from GitHub's
+          # cache service) must not fail a build whose image is complete; the
+          # next build only runs with a colder cache.
+          cache-to: type=gha,mode=max,ignore-error=true
           no-cache: ${{ inputs.force_rebuild == true }}
           provenance: true
           sbom: true
@@ -150,17 +186,23 @@ jobs:
 
       - name: Write job summary
         if: always() && steps.build.outcome == 'success'
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          COMMIT: ${{ steps.target.outputs.sha }}
         run: |
           {
             echo "## 🐳 Production Image Build"
             echo ""
             echo "| Field | Value |"
             echo "|-------|-------|"
-            echo "| **Image** | \`ghcr.io/${{ github.repository }}\` |"
-            echo "| **Digest** | \`${{ steps.build.outputs.digest }}\` |"
-            echo "| **Tags** | \`${{ steps.meta.outputs.tags }}\` |"
+            echo "| **Image** | \`$IMAGE\` |"
+            echo "| **Digest** | \`$DIGEST\` |"
+            # metadata-action lists one tag per line; keep them in one table cell.
+            echo "| **Tags** | \`${TAGS//$'\n'/, }\` |"
             echo "| **Platforms** | \`linux/amd64, linux/arm64\` |"
-            echo "| **Commit** | \`${{ github.sha }}\` |"
+            echo "| **Commit** | \`$COMMIT\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # main -> production, develop -> staging (Section 1 / Section F of
