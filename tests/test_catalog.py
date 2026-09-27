@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.agent.catalog import LIMITED_VALUE_FIELDS, build_catalog, mentioned_names
-from app.agent.prompts import FIELD_GUIDE, render_knowledge_base_structure
+from app.agent.prompts import FIELD_GUIDE, LISTED_VALUE_FIELDS, render_knowledge_base_structure
 
 # Small corpus with the same shape problems as the real one: a group that is also a category
 # name ("drinks"), a category under two groups ("ramen"), groups with a single category, and FAQ
@@ -280,8 +280,22 @@ def test_the_structure_block_states_every_count_and_value() -> None:
     assert "- menu_item: 4 groups: drinks; extras; kids; the main event" in block  # rule 9
     assert "  - kids: 2 categories: drinks; ramen" in block  # rule 10
     assert "  - extras: 1 category: extras" in block
-    for name in LIMITED_VALUE_FIELDS:  # rule 7
-        assert f"- {name} (" in block
+    lines = block.splitlines()
+    for name in LISTED_VALUE_FIELDS:  # rule 7: values on the field's own line
+        assert any(line.startswith(f"- {name}: ") and " Values: " in line for line in lines)
+    assert "- dietary_tags: " in block and "Values: vegan; vegetarian" in block
+    assert "Values: ea; portion; null" in block
+
+
+def test_the_structure_block_does_not_repeat_values_the_tree_already_names() -> None:
+    block = render_knowledge_base_structure(build_catalog(ROWS))
+    lines = block.splitlines()
+
+    for name in set(LIMITED_VALUE_FIELDS) - set(LISTED_VALUE_FIELDS):
+        field_line = next(line for line in lines if line.startswith(f"- {name}: "))
+        assert "Values:" not in field_line
+    assert set(LISTED_VALUE_FIELDS) < set(LIMITED_VALUE_FIELDS)
+    assert "coffee-tea" not in block  # category_slug values are never listed
 
 
 def test_values_are_separated_by_semicolons_so_a_comma_in_a_name_is_not_a_split() -> None:
