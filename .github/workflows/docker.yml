@@ -83,11 +83,12 @@ jobs:
     steps:
       # Under workflow_run, github.sha and github.ref point at the default
       # branch's latest commit, not the commit CI tested, so a main build
-      # would otherwise check out develop. Build exactly the commit CI passed.
+      # would otherwise check out develop. Build exactly the commit CI passed;
+      # a manual dispatch checks out the ref it was started on.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
           persist-credentials: false
 
       - name: Resolve target branch and commit
@@ -101,6 +102,12 @@ jobs:
           # (that's always the default branch); workflow_dispatch does.
           if [ "$EVENT_NAME" = "workflow_run" ]; then
             branch="$RUN_HEAD_BRANCH"
+            # Checking out a bare SHA leaves a detached HEAD with no branch
+            # refs, and metadata-action's git context cannot infer a ref from
+            # that ("Cannot infer ref from detached HEAD"). Name the tested
+            # commit after its branch, without moving it.
+            git check-ref-format --branch "$branch" > /dev/null
+            git switch --quiet --force-create "$branch"
           else
             branch="$REF_NAME"
           fi
