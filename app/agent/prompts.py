@@ -173,18 +173,29 @@ FIELD_GUIDE: list[tuple[str, str]] = [
     ("fibre_g", "fibre in grams per serving (menu_item only)."),
     ("allergens_contains", "allergens the dish contains, from the restaurant's own data."),
     ("allergens_may_contain", "allergens the dish may contain through cross-contact."),
-    ("dietary_tags", "vegetarian and/or vegan, when the dish qualifies (menu_item only)."),
+    ("dietary_tags", "the dish's dietary labels, when it qualifies (menu_item only)."),
     (
         "is_gluten_free_listed",
         "true when this exact dish also appears in the restaurant's gluten-free section.",
     ),
     ("portion_value", "portion size number; mostly 1 and not very informative."),
-    ("portion_unit", "portion size unit (ea or portion); not very informative."),
+    ("portion_unit", "portion size unit; not very informative."),
     ("servings", "number of servings, as published."),
     ("abv_percent", "alcohol by volume; 0.0 for non-alcoholic drinks, null for food."),
     ("image", "image file name; internal, never shown as text."),
     ("last_updated", "when the row was last changed at the source."),
 ]
+
+
+# The limited-value fields whose every value is listed on the field's own line (rule K-01).
+# item_type, category and category_path are left out because the item-type line and the
+# group/category tree below the fields name every one of their values; category_slug is only
+# category in kebab-case.
+LISTED_VALUE_FIELDS = tuple(
+    name
+    for name in LIMITED_VALUE_FIELDS
+    if name not in {"item_type", "category", "category_slug", "category_path"}
+)
 
 
 def _count(n: int, singular: str, plural: str) -> str:
@@ -193,25 +204,22 @@ def _count(n: int, singular: str, plural: str) -> str:
 
 def render_knowledge_base_structure(catalog: MenuCatalog) -> str:
     """The description of the knowledge base given to the understanding call: what a row looks
-    like, every value the limited-value fields take, the item types, and how each item type is
-    organised (its groups and their categories). Built from the live corpus, so it cannot drift
-    from the data; only the wording of FIELD_GUIDE is maintained by hand."""
+    like (with the values of LISTED_VALUE_FIELDS on their field's line), the item types, and how
+    each item type is organised (its groups and their categories). Built from the live corpus,
+    so it cannot drift from the data; only the wording of FIELD_GUIDE is maintained by hand."""
     lines = [
         "Knowledge base structure",
         "",
         f"The knowledge base holds {catalog.total_rows} rows. Every row has the same "
-        f"{len(FIELD_GUIDE)} fields:",
-        *(f"- {name}: {meaning}" for name, meaning in FIELD_GUIDE),
-        "",
-        "Fields that take a limited set of values, with every value they take (values are "
-        "separated by semicolons, because some contain commas):",
+        f"{len(FIELD_GUIDE)} fields. A field that takes a few fixed values lists every one after "
+        '"Values:", separated by semicolons (some values contain commas); every group and '
+        "category is listed further down, under how each item type is organised.",
     ]
-    for name in LIMITED_VALUE_FIELDS:
-        values = catalog.field_values.get(name, ())
-        what = " (every name that appears anywhere in a path)" if name == "category_path" else ""
-        lines.append(
-            f"- {name} ({_count(len(values), 'value', 'values')}){what}: {'; '.join(values)}"
-        )
+    for name, meaning in FIELD_GUIDE:
+        line = f"- {name}: {meaning}"
+        if name in LISTED_VALUE_FIELDS:
+            line += f" Values: {'; '.join(catalog.field_values.get(name, ()))}"
+        lines.append(line)
 
     types = catalog.item_type_counts
     lines += [
