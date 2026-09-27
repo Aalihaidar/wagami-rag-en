@@ -8,15 +8,15 @@ repo. The project overview lives in the root [`README.md`](../README.md).
 
 ## 1. Branching model
 
-```
+```text
 feature/*  ─PR─▶  develop  ─PR─▶  main   (release)
 ```
 
-| Branch      | Role                                   | Direct push? | Accepts PRs from |
-| ----------- | -------------------------------------- | ------------ | ---------------- |
-| `main`      | Released / deployable history          | ❌ (after bootstrap) | `develop` **only** |
-| `develop`   | Integration branch, **default branch** | ❌ (PR only)  | `feature/*`, `fix/*`, `chore/*`, `hotfix/*` |
-| `feature/*` | Short-lived work branches              | ✅            | —                |
+| Branch      | Role                                   | Direct push?         | Accepts PRs from                            |
+| ----------- | -------------------------------------- | -------------------- | ------------------------------------------- |
+| `main`      | Released / deployable history          | ❌ (after bootstrap) | `develop` **only**                          |
+| `develop`   | Integration branch, **default branch** | ❌ (PR only)         | `feature/*`, `fix/*`, `chore/*`, `hotfix/*` |
+| `feature/*` | Short-lived work branches              | ✅                   | —                                           |
 
 - **`develop` is the default branch.** Dependabot reads `.github/dependabot.yml`
   from the default branch, and its `target-branch: develop` means every
@@ -41,9 +41,9 @@ git push -u origin develop
 
 Then on GitHub:
 
-3. **Settings → General → Default branch** → set to `develop`.
-4. **Settings → Rules → Rulesets** → create the two rulesets in §2.
-5. **Settings → Code security** → enable *Dependabot alerts*, *Dependabot
+1. **Settings → General → Default branch** → set to `develop`.
+2. **Settings → Rules → Rulesets** → create the two rulesets in §2.
+3. **Settings → Code security** → enable *Dependabot alerts*, *Dependabot
    security updates*, and *Private vulnerability reporting*.
 
 From here on: branch off `develop`, open a PR into `develop`; periodically
@@ -136,9 +136,20 @@ manual PR (search `.github/workflows/` for `runs-on:`).
 `workflow_run` after CI succeeds on `main` **or** `develop` (or manual
 `workflow_dispatch`) → build one multi-arch image → push to GHCR with
 provenance + SBOM → Trivy scan → SARIF to the Security tab → trigger the
-matching Render deploy hook. Because both branches are ruleset-protected
-(§2 — PR-only, no direct pushes), a green CI run here is always the result
-of a merged PR, never a stray push.
+matching Render deploy hook. The build runs only for a green CI run
+triggered by a **push** in this repository: because both branches are
+ruleset-protected (§2 — PR-only, no direct pushes), that is always a merged
+PR. CI runs for pull requests are skipped, including the `develop → main`
+release PR's own run, whose head branch is `develop` and would otherwise
+rebuild and redeploy staging with a commit already shipped.
+
+The build checks out the commit CI tested (`workflow_run.head_sha`), not
+`github.sha`, which under `workflow_run` is the latest commit on the default
+branch (`develop`), and the `sha-` tag and revision label are read from that
+checkout. Builds queue per target branch, so a staging build never replaces a
+pending production one. The layer cache is best-effort
+(`cache-to: …,ignore-error=true`): a failed cache write, such as GitHub's
+"failed to reserve cache", leaves the image pushed and deployed.
 
 | Branch merged into | Image tag | Deploy target | GitHub Environment | Deploy hook secret |
 | --- | --- | --- | --- | --- |
