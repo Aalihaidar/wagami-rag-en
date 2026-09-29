@@ -58,6 +58,12 @@ services:
         sync: false
       - key: IMAGE_BASE_URL
         sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+        # Optional; empty keeps the Telegram bot off. One bot per service: a bot has
+        # only one webhook.
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
 
   - name: wagami-rag-en
     type: web
@@ -83,4 +89,10 @@ services:
       - key: REDIS_URL
         sync: false
       - key: IMAGE_BASE_URL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+        # Optional; empty keeps the Telegram bot off. One bot per service: a bot has
+        # only one webhook.
+      - key: TELEGRAM_WEBHOOK_SECRET
         sync: false
