@@ -1,3 +1,6 @@
+import re
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -54,6 +57,29 @@ def test_telegram_may_frame_the_page_once_a_mini_app_url_is_set(
     assert "script-src 'self' https://telegram.org" in csp
     assert "default-src 'self'" in csp and "style-src 'self'" in csp
     assert "X-Frame-Options" not in response.headers
+
+
+def _css_declarations(css: str, selector: str) -> dict[str, str]:
+    """The `--token: value` pairs of the first rule with exactly this selector."""
+    start = css.index(selector + " {") + len(selector) + 2
+    body = css[start : css.index("}", start)]
+    return dict(re.findall(r"(--[\w-]+):\s*([^;]+);", body))
+
+
+def test_forced_dark_palette_is_identical_to_the_device_dark_palette() -> None:
+    """Telegram's theme is applied by data-theme="dark", a second copy of the dark tokens that
+    the device setting (prefers-color-scheme) uses; the two must never drift apart."""
+    css = (Path(main_module.__file__).parent / "static" / "css" / "chat.css").read_text()
+    device = _css_declarations(css, ':root:not([data-theme="light"])')
+    forced = _css_declarations(css, ':root[data-theme="dark"]')
+    assert len(device) >= 15
+    assert forced == device
+
+
+def test_chat_css_defines_every_dark_token_in_the_light_palette_too() -> None:
+    css = (Path(main_module.__file__).parent / "static" / "css" / "chat.css").read_text()
+    light = _css_declarations(css, ":root")
+    assert set(_css_declarations(css, ':root[data-theme="dark"]')) <= set(light)
 
 
 def test_unknown_route_returns_consistent_error_shape() -> None:
