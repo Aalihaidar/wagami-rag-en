@@ -4,16 +4,26 @@ An agentic **Retrieval-Augmented Generation** chatbot for a restaurant menu.
 Guests ask about dishes, prices, per-serving nutrition and allergens, and get
 answers grounded entirely in a curated knowledge base rather than a language
 model's own knowledge. English-only. The repo holds the FastAPI service, the
-LangGraph agent, the guest-facing chat page, and the tooling that loads the
-knowledge base into Weaviate Cloud.
+LangGraph agent, the guest-facing chat page, a Telegram bot that talks to the same
+agent, and the tooling that loads the knowledge base into Weaviate Cloud.
 
 ![CI](https://github.com/Aalihaidar/wagami-rag-en/actions/workflows/ci.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)
 
-**Staging:** <https://wagami-rag-en-staging.onrender.com> — deployed from `develop`
-(it runs on Render's free plan, so the first request after a quiet spell can be slow
-while the service wakes up).
+## Try it
+
+This is a demo restaurant, not a real one, running on the free tiers of every service it uses.
+
+| | Link |
+| --- | --- |
+| **Website** (chat page) | <https://wagami-rag-en-staging.onrender.com> |
+| **Telegram bot** | [@wagami_restaurant_bot](https://t.me/wagami_restaurant_bot) |
+| **Telegram Mini App** (the website, opened inside Telegram) | <https://t.me/wagami_restaurant_bot/ask> |
+
+All three are the staging deployment, built from `develop`. Render's free plan puts the
+service to sleep when it is idle, so the first request after a quiet spell can take a while
+while it wakes up.
 
 ## What it does
 
@@ -29,7 +39,7 @@ Not every message needs a search. One LLM call reads the message and decides how
 it is handled:
 
 | The guest says | Handled as | LLM calls |
-|---|---|---|
+| --- | --- | --- |
 | "hello" | fixed greeting | 1 |
 | something unrelated to the restaurant | fixed, polite redirect | 1 |
 | "what's on the menu?", "show me the drinks", "sides" | the menu's groups → categories → items, straight from the corpus: groups and categories as picture cards (the name and a dedicated picture for it), items each described with a card and its own dish photo — no search | 1 |
@@ -38,6 +48,10 @@ it is handled:
 
 A "browse" that states a diet, allergy, price, calorie or protein requirement is
 always turned into a real search in code, so allergen exclusion is never skipped.
+
+The same agent answers on two surfaces: the **web chat page** and the **Telegram bot**
+(see [Telegram bot](#telegram-bot)). Both run the same chat turn, under the same token-budget,
+conversation-length and concurrency caps.
 
 ## How a message flows
 
@@ -59,8 +73,9 @@ flowchart TD
 ## Architecture
 
 | Layer | Component |
-|---|---|
+| --- | --- |
 | API & UI | FastAPI service: `POST /chat`, streaming `POST /chat/stream` (SSE), session endpoints, `/healthz`, and a server-rendered chat page at `/` (plain JS + CSS, no build step) |
+| Telegram | `POST /telegram/webhook` → the same chat turn as `/chat`, sent back through the Bot API; menu lists and dishes as inline buttons and photos; the chat page itself as a Mini App |
 | Agent | LangGraph state graph: *query → respond \| retrieve → ground → answer* |
 | Retrieval | Weaviate Cloud hybrid search over one `KnowledgeBase` collection, then Cohere rerank |
 | Embeddings | Cohere `embed-english-v3.0` via Weaviate's `text2vec-cohere` module — only the composed `embedding_text` field is vectorized; everything else is structured metadata for filtering and display |
@@ -73,7 +88,8 @@ flowchart TD
 - **Grounded only.** The generation prompt answers from the retrieved rows and
   declines otherwise; a scope and prompt-injection guard is part of every call,
   and an output-side check blocks replies that leak the instructions.
-- **Rate limit:** 10 chat requests a minute per client IP (Redis-backed).
+- **Rate limit:** 10 chat requests a minute per client IP (Redis-backed); on Telegram, 10
+  messages a minute per chat, since every update arrives from Telegram's own servers.
 - **Input cap:** messages over 500 characters are rejected before any LLM call.
 - **Token budgets:** a daily and a monthly cap, and a maximum number of turns per
   conversation; when one is reached the guest gets a polite "at capacity" reply.
@@ -81,17 +97,20 @@ flowchart TD
 - **Privacy:** access logs are structured and never include the guest's message.
 - **Hardening:** security headers on every response (CSP, `X-Frame-Options`,
   `nosniff`, no-referrer, HSTS in production); `/docs` and `/redoc` are off in production.
+  The page refuses to be framed, except that with `TELEGRAM_WEB_APP_URL` set only Telegram's
+  own domains may frame it (for the Mini App).
 
 ## API
 
 | Endpoint | Purpose |
-|---|---|
+| --- | --- |
 | `GET /` | the guest chat page |
 | `POST /session` | start a conversation → `{"session_id": ...}` |
 | `POST /chat` | `{"session_id", "message", "browse"?}` → `{"session_id", "answer", "cited_items", "choices"}` |
 | `POST /chat/stream` | same request; server-sent events `delta` (text as it is written), `done` (final answer + cited items), `error` |
 | `DELETE /session/{session_id}` | end a conversation and drop its history |
 | `GET /healthz` | liveness probe |
+| `POST /telegram/webhook` | where Telegram posts the bot's updates; `404` while the bot is off, `403` without the secret Telegram echoes back |
 
 Each entry of `cited_items` has `id`, `slug`, `name`, `description`, `ingredients`,
 `price_gbp` and `image`. `choices` is `null` except for a reply that lists menu groups or
@@ -105,7 +124,7 @@ it instead), and the reply simply appears -- the question the click sends is not
 guest message, though it is saved to the conversation history. A group's card lists its
 categories and a category's card lists its items: the page sends a readable `message` plus `"browse": {"group", "category"}` (from the card, `category` is
 `null` for a group), and the server answers that browse from the menu catalog with no model call.
-A dish's card sends "Tell me about <name>" as an ordinary message.
+A dish's card sends `Tell me about <name>` as an ordinary message.
 
 ## Menu images
 
@@ -137,7 +156,7 @@ every row (`null` where a field doesn't apply — FAQ rows null out the menu-spe
 fields):
 
 | Group | Fields |
-|---|---|
+| --- | --- |
 | Identity | `id`, `item_type`, `name`, `slug`, `description`, `ingredients`, `category` / `category_slug` / `category_path` |
 | Retrieval | `embedding_text` — the only vectorized field |
 | Price | `price_gbp` |
@@ -186,7 +205,7 @@ Without the dev container, run `uv sync`, start Redis Stack on `:6379`, and use
 All configuration is via environment variables / `.env`:
 
 | Variable | Purpose |
-|---|---|
+| --- | --- |
 | `APP_ENV`, `PORT`, `LOG_LEVEL` | `development` or `production` (production turns off `/docs` and adds HSTS), listen port, log level |
 | `CHAT_ENABLED` | set `false` to take `/chat` offline |
 | `WEAVIATE_URL` | Weaviate Cloud cluster |
@@ -197,7 +216,59 @@ All configuration is via environment variables / `.env`:
 | `UNDERSTAND_MODEL`, `GENERATION_MODEL` | models for query understanding and answer generation |
 | `REDIS_URL` | Redis **Stack** (not plain Redis): session memory, rate limits, token budgets |
 | `IMAGE_BASE_URL` | public base URL of the `menu/` image folder (see **Menu images**) |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` | the Telegram bot's token (from @BotFather) and the random secret passed to `setWebhook`; leave the token empty to keep the bot off |
+| `TELEGRAM_WEB_APP_URL` | the chat page's public https URL: adds an "Open Wagami assistant" button to `/start` and lets Telegram frame the page (the Mini App) |
 | `DAILY_TOKEN_LIMIT`, `MONTHLY_TOKEN_LIMIT`, `MAX_CONVERSATION_TURNS` | cost-control limits |
+
+### Telegram bot
+
+The bot is optional and off until `TELEGRAM_BOT_TOKEN` is set; the web chat never depends on it.
+
+What a guest gets in the bot chat:
+
+- Any question is answered by the same agent, with its own conversation per Telegram chat.
+- A list of menu groups or categories arrives as **one picture** (each cover with its name under
+  it) with a button per name; tapping one browses into it with no model call, like a card click on
+  the page (`app/telegram_grid.py`).
+- One dish comes with its photo, price, diet tags, calories and allergens; a list of dishes comes
+  as photos with a "Tell me about …" button each.
+- `/start` sends the welcome, with an **Open Wagami assistant** button when `TELEGRAM_WEB_APP_URL`
+  is set. `/reset` forgets the conversation, deletes the chat's latest messages (up to 1000, and
+  only those Telegram still allows: nothing older than 48 hours) and sends the welcome again.
+- The **Mini App** opens the web chat page itself inside Telegram, so its cards, grids and
+  single-dish view look exactly as on the website. It keeps its own conversation, separate from
+  the bot chat's.
+
+Only private chats are answered. Redelivered updates are ignored, and the bot token is never
+logged.
+
+Setting it up:
+
+1. In [@BotFather](https://t.me/BotFather): `/newbot`, then set a description, about text, and
+   `/setcommands` (`start`, `reset`).
+2. Set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` (any long random string) and, for the
+   Mini App, `TELEGRAM_WEB_APP_URL` on the service. A bot has one webhook, so staging and
+   production each need their own bot and token.
+3. Register the webhook once the service is deployed:
+
+   ```bash
+   curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+     -d url=https://<your-service>/telegram/webhook \
+     -d secret_token=<TELEGRAM_WEBHOOK_SECRET> \
+     -d 'allowed_updates=["message","callback_query"]'
+   ```
+
+4. Optional, for the Mini App: `/newapp` in BotFather (its short name gives a direct link,
+   `t.me/<bot>/<short name>`, which also works as a QR code), and the menu button:
+
+   ```bash
+   curl "https://api.telegram.org/bot<TOKEN>/setChatMenuButton" \
+     -H 'Content-Type: application/json' \
+     -d '{"menu_button":{"type":"web_app","text":"Open menu","web_app":{"url":"https://<your-service>"}}}'
+   ```
+
+Telegram cannot open a Mini App without a tap: the direct link, the menu button, the `/start`
+button and the bot profile's launch button are the ways in.
 
 ### Loading the knowledge base
 
@@ -236,7 +307,7 @@ branch-protection rulesets, and release flow.
 
 ## Deployment
 
-```
+```text
 feature/*  ─PR─▶  develop  ─PR─▶  main
                      │              │
                   staging       production
@@ -248,16 +319,19 @@ Merging to `develop` or `main` (both PR-only) runs CI; when it is green,
 non-root, gunicorn with uvicorn workers), scans it, pushes it to GHCR
 (`staging` from `develop`, `latest` from `main`) and calls the matching Render
 deploy hook. [`render.yaml`](render.yaml) is the Blueprint for the two Render
-services. Staging is live at <https://wagami-rag-en-staging.onrender.com>.
+services. Staging is live at <https://wagami-rag-en-staging.onrender.com>. The Telegram webhook
+and the bot's variables are set per service (see [Telegram bot](#telegram-bot)).
 
 ## Project layout
 
-```
+```text
 app/
   main.py            FastAPI app: routes, middleware, chat turns
   config.py          settings (env / .env)
   cost_control.py    token budgets and conversation limits
   retrieval.py       Weaviate hybrid search + Cohere rerank
+  telegram_bot.py    the Telegram bot: updates, replies, buttons, /reset
+  telegram_grid.py   the picture of menu covers with names sent for a list
   agent/
     graph.py         the LangGraph state graph
     understanding.py query understanding: routing, filters, safety nets
@@ -266,7 +340,7 @@ app/
     generation.py    grounded answer prompt and output checks
     prompts.py       every system prompt
     llm.py, memory.py, checkpointer.py
-  templates/, static/  the chat page
+  templates/, static/  the chat page (static/js/telegram.js: Mini App support)
 scripts/             knowledge-base load/delete, dev server, latency and adversarial checks
 notebooks/           retrieval, generation and evaluation notebooks
 tests/               pytest suite
