@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # can drive the bot.
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
+    # The chat page's own public https URL: turns it into a Telegram Mini App -- /start gets an
+    # "open" button for it, and the page may be framed by Telegram's own domains (see
+    # app/main.py's security_headers). Empty leaves /start as plain text.
+    telegram_web_app_url: str = ""
 
     # Section D (rate limiting & cost control) -- tune to your actual budget/provider limits.
     daily_token_limit: int = DAILY_TOKEN_LIMIT_DEFAULT

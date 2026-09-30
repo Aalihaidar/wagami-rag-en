@@ -22,6 +22,13 @@ A button's `callback_data` may hold only 64 bytes, too few for a group, category
 so it carries a short hash of what the button does and the full pick is kept in Redis under
 that hash (`BUTTON_TTL_SECONDS`). A tap on a button older than that says so instead.
 
+/reset starts over: the conversation's memory is dropped, the chat's messages are deleted
+(`TelegramBot._clear_chat`) and the welcome is sent again.
+
+With a web app URL (TELEGRAM_WEB_APP_URL), /start's welcome comes with a button that opens the web
+chat page itself inside Telegram as a Mini App -- the page's own design, cards and detail view,
+which a message cannot carry. The page keeps its own conversation, separate from this chat's.
+
 Only private chats are answered: in a group, one shared session and rate limit would cover every
 member.
 """
@@ -58,7 +65,7 @@ WELCOME_MESSAGE = (
     "A real restaurant deployment could add both.\n\n"
     "Send /reset any time to start a new conversation."
 )
-RESET_REPLY = "Done, I've cleared our conversation. What would you like to know?"
+OPEN_APP_LABEL = "Open Wagami assistant"
 CONVERSATION_LIMIT_TELEGRAM_REPLY = (
     "This conversation has gotten pretty long! Please send /reset to start a new one so I can "
     "keep giving you my full attention."
@@ -79,6 +86,10 @@ RATE_LIMIT_PER_MINUTE = 10
 # Telegram retries an update it thinks went undelivered; one it has already sent is dropped.
 UPDATE_SEEN_TTL_SECONDS = 24 * 60 * 60
 BUTTON_TTL_SECONDS = 30 * 24 * 60 * 60
+# /reset deletes at most this many of the chat's latest messages, in calls of DELETE_BATCH (the
+# Bot API's limit for deleteMessages).
+CLEAR_MAX_MESSAGES = 1000
+DELETE_BATCH = 100
 # Telegram's id for an uploaded grid picture, reused for the same list instead of drawing and
 # uploading it again.
 GRID_FILE_ID_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -250,8 +261,9 @@ class TelegramClient:
         # For the grid's cover pictures (public image storage, not the Bot API).
         self._images = httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0), transport=transport)
 
-    def call(self, method: str, payload: dict[str, Any]) -> Any:
-        return self._request(method, json=payload)
+    def call(self, method: str, payload: dict[str, Any], *, quiet: bool = False) -> Any:
+        """`quiet`: a rejection is expected, so it is logged at DEBUG instead of WARNING."""
+        return self._request(method, quiet=quiet, json=payload)
 
     def upload(
         self, method: str, fields: dict[str, Any], files: dict[str, tuple[str, bytes, str]]
@@ -270,14 +282,19 @@ class TelegramClient:
             return None
         return response.content
 
-    def _request(self, method: str, **kwargs: Any) -> Any:
+    def _request(self, method: str, *, quiet: bool = False, **kwargs: Any) -> Any:
         try:
             body = self._http.post(method, **kwargs).json()
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning("Telegram %s failed: %s", method, type(exc).__name__)
             return None
         if not body.get("ok"):
-            logger.warning("Telegram %s rejected: %s", method, body.get("description"))
+            logger.log(
+                logging.DEBUG if quiet else logging.WARNING,
+                "Telegram %s rejected: %s",
+                method,
+                body.get("description"),
+            )
             return None
         return body.get("result")
 
@@ -293,7 +310,9 @@ class TelegramBot:
         redis_client: Redis,
         run_turn: RunTurn,
         reset_session: ResetSession,
+        web_app_url: str = "",
     ) -> None:
+        self._web_app_url = web_app_url
         self._client = client
         self._redis = redis_client
         self._run_turn = run_turn
@@ -330,22 +349,47 @@ class TelegramBot:
             return
         text = text.strip()
         if text.startswith("/"):
-            self._handle_command(chat_id, text)
+            self._handle_command(chat_id, text, message.get("message_id"))
         elif len(text) > CHAT_MESSAGE_MAX_LENGTH:
             self._send(chat_id, [Text(TOO_LONG_REPLY)])
         else:
             self._answer(chat_id, text, None)
 
-    def _handle_command(self, chat_id: int, text: str) -> None:
+    def _handle_command(self, chat_id: int, text: str, message_id: object = None) -> None:
         # "/start", "/start <deep-link payload>" or "/start@wagami_restaurant_bot".
         command = text.split()[0].split("@")[0].lower()
         if command in ("/start", "/help"):
-            self._send(chat_id, [Text(WELCOME_MESSAGE)])
+            self._send_welcome(chat_id)
         elif command == "/reset":
             self._reset_session(session_id_for(chat_id))
-            self._send(chat_id, [Text(RESET_REPLY)])
+            if isinstance(message_id, int):
+                self._clear_chat(chat_id, message_id)
+            self._send_welcome(chat_id)
         else:
             self._send(chat_id, [Text(UNKNOWN_COMMAND_REPLY)])
+
+    def _send_welcome(self, chat_id: int) -> None:
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": WELCOME_MESSAGE}
+        if self._web_app_url:
+            payload["reply_markup"] = {
+                "inline_keyboard": [
+                    [{"text": OPEN_APP_LABEL, "web_app": {"url": self._web_app_url}}]
+                ]
+            }
+        self._client.call("sendMessage", payload)
+
+    def _clear_chat(self, chat_id: int, last_message_id: int) -> None:
+        """Delete the chat's messages, the guest's and the bot's, up to `last_message_id` (the
+        /reset message itself). The Bot API has no way to list a chat's history, but message ids in
+        a private chat count up, so every id from the newest down is asked for in batches;
+        Telegram skips the ones that don't exist or can no longer be deleted (a message older than
+        48 hours stays), which is why a rejection here is expected and not logged as a warning."""
+        first = max(1, last_message_id - CLEAR_MAX_MESSAGES + 1)
+        for start in range(first, last_message_id + 1, DELETE_BATCH):
+            ids = list(range(start, min(start + DELETE_BATCH, last_message_id + 1)))
+            self._client.call(
+                "deleteMessages", {"chat_id": chat_id, "message_ids": ids}, quiet=True
+            )
 
     def _handle_button(self, callback: dict[str, Any]) -> None:
         # Always answered, even when nothing else is done: until it is, the guest's app shows a

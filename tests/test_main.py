@@ -1,8 +1,18 @@
+import pytest
 from fastapi.testclient import TestClient
 
+import app.main as main_module
+from app.config import Settings
 from app.main import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _mini_app_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The header tests below mean the default (no Mini App URL) regardless of this machine's own
+    .env; the Mini App test sets the URL itself."""
+    monkeypatch.setattr(main_module, "settings", Settings(telegram_web_app_url=""))
 
 
 def test_healthz() -> None:
@@ -22,6 +32,30 @@ def test_security_headers_present_on_every_response() -> None:
     assert "Strict-Transport-Security" not in response.headers
 
 
+def test_no_framing_and_no_external_scripts_while_the_mini_app_is_off() -> None:
+    response = client.get("/healthz")
+    csp = response.headers["Content-Security-Policy"]
+    assert "frame-ancestors 'none'" in csp
+    assert "telegram.org" not in csp
+
+
+def test_telegram_may_frame_the_page_once_a_mini_app_url_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main_module, "settings", Settings(telegram_web_app_url="https://chat.example.com")
+    )
+    response = client.get("/healthz")
+    csp = response.headers["Content-Security-Policy"]
+    # Only Telegram's own domains may frame it, and X-Frame-Options (which cannot name them) is
+    # gone; everything else in the policy is unchanged.
+    assert "frame-ancestors https://web.telegram.org https://*.telegram.org;" in csp
+    assert "frame-ancestors 'none'" not in csp
+    assert "script-src 'self' https://telegram.org" in csp
+    assert "default-src 'self'" in csp and "style-src 'self'" in csp
+    assert "X-Frame-Options" not in response.headers
+
+
 def test_unknown_route_returns_consistent_error_shape() -> None:
     response = client.get("/this-route-does-not-exist")
     assert response.status_code == 404
@@ -35,6 +69,7 @@ def test_chat_page_renders() -> None:
     body = response.text
     assert "<title>Menu &amp; FAQ Assistant</title>" in body
     assert "/static/js/chat.js" in body
+    assert "/static/js/telegram.js" in body
     assert "/static/css/chat.css" in body
 
 
