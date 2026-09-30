@@ -176,11 +176,22 @@ async def security_headers(request: Request, call_next):  # type: ignore[no-unty
     """
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = (
-        f"default-src 'self'; frame-ancestors 'none'; {CSP_IMG_SRC}; style-src 'self'"
-    )
+    if settings.telegram_web_app_url:
+        # The Mini App: Telegram Web shows the chat page in a frame of its own domains, which
+        # the page otherwise refuses. frame-ancestors names exactly those; X-Frame-Options has no
+        # way to (and would win over it in some browsers), so it is left off in this case. The
+        # SDK script (static/js/telegram.js, loaded only inside Telegram) comes from telegram.org.
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; frame-ancestors https://web.telegram.org "
+            f"https://*.telegram.org; {CSP_IMG_SRC}; style-src 'self'; "
+            "script-src 'self' https://telegram.org"
+        )
+    else:
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = (
+            f"default-src 'self'; frame-ancestors 'none'; {CSP_IMG_SRC}; style-src 'self'"
+        )
     if settings.app_env == "production":
         # Only meaningful over HTTPS, which is what production actually runs behind (Render);
         # sending it in dev over plain HTTP would just be inert noise.
@@ -685,7 +696,13 @@ async def _handle_telegram_update(app: FastAPI, update: dict[str, Any]) -> None:
         _log_turn_timings(timings)
         return _build_chat_response(session_id, reply)
 
-    bot = TelegramBot(app.state.telegram_client, redis_client, run_turn, checkpointer.delete_thread)
+    bot = TelegramBot(
+        app.state.telegram_client,
+        redis_client,
+        run_turn,
+        checkpointer.delete_thread,
+        settings.telegram_web_app_url,
+    )
     if not await _try_acquire_chat_slot():
         await run_in_threadpool(bot.reply_busy, update)
         return

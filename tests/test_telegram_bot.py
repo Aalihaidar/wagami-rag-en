@@ -20,7 +20,6 @@ from app.telegram_bot import (
     NOT_TEXT_REPLY,
     RATE_LIMIT_PER_MINUTE,
     RATE_LIMITED_REPLY,
-    RESET_REPLY,
     TOO_LONG_REPLY,
     WELCOME_MESSAGE,
     Grid,
@@ -74,7 +73,7 @@ class FakeTelegramClient:
         self._failing = failing or set()
         self._covers = covers or {}
 
-    def call(self, method: str, payload: dict[str, Any]) -> Any:
+    def call(self, method: str, payload: dict[str, Any], *, quiet: bool = False) -> Any:
         self.calls.append((method, payload))
         return None if method in self._failing else {"message_id": len(self.calls)}
 
@@ -120,6 +119,7 @@ class Harness:
         turn_reply: ChatResponse | None = None,
         failing: set[str] | None = None,
         covers: dict[str, bytes] | None = None,
+        web_app_url: str = "",
     ):
         self.client = FakeTelegramClient(failing=failing, covers=covers)
         self.redis = FakeRedis()
@@ -131,6 +131,7 @@ class Harness:
             self.redis,  # type: ignore[arg-type]
             self.run_turn,
             self.resets.append,
+            web_app_url,
         )
         self._next_update_id = 1
 
@@ -138,8 +139,12 @@ class Harness:
         self.turns.append((session_id, message, browse))
         return self.turn_reply
 
-    def send(self, text: str | None, *, chat_type: str = "private") -> None:
+    def send(
+        self, text: str | None, *, chat_type: str = "private", message_id: int | None = None
+    ) -> None:
         message: dict[str, Any] = {"chat": {"id": CHAT_ID, "type": chat_type}}
+        if message_id is not None:
+            message["message_id"] = message_id
         if text is not None:
             message["text"] = text
         self.bot.handle({"update_id": self._take_id(), "message": message})
@@ -251,9 +256,71 @@ def test_start_and_reset_commands() -> None:
     harness = Harness()
     harness.send("/start")
     harness.send("/reset@wagami_restaurant_bot")
-    assert harness.client.texts() == [WELCOME_MESSAGE, RESET_REPLY]
+    # /reset starts over, so it ends with the welcome again (and no "done" message of its own).
+    assert harness.client.texts() == [WELCOME_MESSAGE, WELCOME_MESSAGE]
     assert harness.resets == ["telegram:42"]
     assert harness.turns == []
+
+
+def _deleted(harness: Harness) -> list[list[int]]:
+    return [payload["message_ids"] for payload in harness.client.sent("deleteMessages")]
+
+
+def test_reset_deletes_the_chats_messages_in_batches_then_sends_the_welcome() -> None:
+    harness = Harness(web_app_url="https://chat.example.com")
+    harness.send("/reset", message_id=250)
+    assert _deleted(harness) == [
+        list(range(1, 101)),
+        list(range(101, 201)),
+        list(range(201, 251)),  # includes the /reset message itself
+    ]
+    assert all(p["chat_id"] == CHAT_ID for p in harness.client.sent("deleteMessages"))
+    assert harness.resets == ["telegram:42"]
+    # Messages are deleted before the new welcome is sent, so the welcome is what stays.
+    methods = [method for method, _ in harness.client.calls]
+    assert methods.index("deleteMessages") < methods.index("sendMessage")
+    [welcome] = harness.client.sent()
+    assert welcome["text"] == WELCOME_MESSAGE
+    assert "web_app" in welcome["reply_markup"]["inline_keyboard"][0][0]
+
+
+def test_reset_only_goes_back_a_bounded_number_of_messages() -> None:
+    harness = Harness()
+    harness.send("/reset", message_id=5000)
+    batches = _deleted(harness)
+    assert len(batches) == 10
+    assert batches[0][0] == 4001 and batches[-1][-1] == 5000
+
+
+def test_reset_still_starts_over_when_deleting_fails_or_the_id_is_unknown() -> None:
+    harness = Harness(failing={"deleteMessages"})
+    harness.send("/reset", message_id=30)
+    assert harness.client.texts() == [WELCOME_MESSAGE]
+    assert harness.resets == ["telegram:42"]
+
+    harness = Harness()
+    harness.send("/reset")  # an update without a message id
+    assert harness.client.sent("deleteMessages") == []
+    assert harness.client.texts() == [WELCOME_MESSAGE]
+
+
+def test_start_offers_the_mini_app_button_when_a_url_is_set() -> None:
+    harness = Harness(web_app_url="https://chat.example.com")
+    harness.send("/start")
+    [welcome] = harness.client.sent()
+    assert welcome["text"] == WELCOME_MESSAGE
+    assert welcome["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "Open Wagami assistant", "web_app": {"url": "https://chat.example.com"}}]
+        ]
+    }
+
+
+def test_start_has_no_button_without_a_mini_app_url() -> None:
+    harness = Harness()
+    harness.send("/start")
+    [welcome] = harness.client.sent()
+    assert "reply_markup" not in welcome
 
 
 def test_non_text_and_too_long_messages_never_reach_the_agent() -> None:
@@ -462,6 +529,22 @@ def test_client_upload_sends_a_multipart_form_and_fetch_gets_pictures() -> None:
     assert b'{"inline_keyboard": []}' in body and b"JPEGDATA" in body
     assert client.fetch("https://img.example/ok.png") == b"PNG"
     assert client.fetch("https://img.example/missing.png") is None
+    client.close()
+
+
+def test_client_logs_an_expected_rejection_below_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"ok": False, "description": "message can't be deleted"})
+
+    client = TelegramClient("t", transport=httpx.MockTransport(handler))
+    with caplog.at_level(logging.WARNING):
+        assert client.call("deleteMessages", {"chat_id": 1}, quiet=True) is None
+    assert caplog.records == []
+    with caplog.at_level(logging.WARNING):
+        assert client.call("deleteMessages", {"chat_id": 1}) is None
+    assert "can't be deleted" in caplog.text
     client.close()
 
 

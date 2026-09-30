@@ -64,6 +64,9 @@ services:
         # only one webhook.
       - key: TELEGRAM_WEBHOOK_SECRET
         sync: false
+      - key: TELEGRAM_WEB_APP_URL
+        sync: false
+        # Optional: this service's own public URL; adds the Mini App button to /start.
 
   - name: wagami-rag-en
     type: web
@@ -96,3 +99,6 @@ services:
         # only one webhook.
       - key: TELEGRAM_WEBHOOK_SECRET
         sync: false
+      - key: TELEGRAM_WEB_APP_URL
+        sync: false
+        # Optional: this service's own public URL; adds the Mini App button to /start.
