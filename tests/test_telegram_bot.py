@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 from typing import Any
@@ -5,6 +6,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 import app.main as main_module
 from app.config import Settings
@@ -21,6 +23,7 @@ from app.telegram_bot import (
     RESET_REPLY,
     TOO_LONG_REPLY,
     WELCOME_MESSAGE,
+    Grid,
     Photos,
     TelegramBot,
     TelegramClient,
@@ -28,6 +31,7 @@ from app.telegram_bot import (
     layout,
     split_text,
 )
+from app.telegram_grid import build_grid
 
 CHAT_ID = 42
 SECRET = "test-webhook-secret"
@@ -58,13 +62,31 @@ class FakeRedis:
 
 
 class FakeTelegramClient:
-    def __init__(self, *, failing: set[str] | None = None) -> None:
+    """Records every Bot API call. `failing` names methods that fail ("upload" for any
+    upload); `covers` maps a picture URL to the bytes `fetch()` returns for it (None otherwise)."""
+
+    def __init__(
+        self, *, failing: set[str] | None = None, covers: dict[str, bytes] | None = None
+    ) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.uploads: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        self.fetched: list[str] = []
         self._failing = failing or set()
+        self._covers = covers or {}
 
     def call(self, method: str, payload: dict[str, Any]) -> Any:
         self.calls.append((method, payload))
         return None if method in self._failing else {"message_id": len(self.calls)}
+
+    def upload(self, method: str, fields: dict[str, Any], files: dict[str, Any]) -> Any:
+        self.uploads.append((method, fields, files))
+        if "upload" in self._failing:
+            return None
+        return {"message_id": 99, "photo": [{"file_id": "small"}, {"file_id": "grid-file-id"}]}
+
+    def fetch(self, url: str) -> bytes | None:
+        self.fetched.append(url)
+        return self._covers.get(url)
 
     def close(self) -> None:
         pass
@@ -92,8 +114,14 @@ def reply(answer: str = "An answer.", **extra: Any) -> ChatResponse:
 
 
 class Harness:
-    def __init__(self, *, turn_reply: ChatResponse | None = None, failing: set[str] | None = None):
-        self.client = FakeTelegramClient(failing=failing)
+    def __init__(
+        self,
+        *,
+        turn_reply: ChatResponse | None = None,
+        failing: set[str] | None = None,
+        covers: dict[str, bytes] | None = None,
+    ):
+        self.client = FakeTelegramClient(failing=failing, covers=covers)
         self.redis = FakeRedis()
         self.turns: list[tuple[str, str, BrowsePick | None]] = []
         self.resets: list[str] = []
@@ -308,6 +336,85 @@ def test_reply_busy_answers_the_chat() -> None:
     assert harness.client.texts() == [BUSY_REPLY]
 
 
+def _png(color: tuple[int, int, int] = (200, 40, 40)) -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (240, 240), color).save(out, format="PNG")
+    return out.getvalue()
+
+
+GRID_CHOICES = Choices(
+    intro="Our menu is organised into these categories:",
+    outro="Which would you like to see?",
+    cards=[
+        ChoiceCard(
+            name="drinks", image="https://img.example/menu/drinks/cover.png", group="drinks"
+        ),
+        ChoiceCard(name="sides", image="https://img.example/menu/sides/cover.png", group="sides"),
+    ],
+)
+
+
+def test_layout_choices_with_picture_urls_become_a_grid() -> None:
+    [grid] = layout(reply(choices=GRID_CHOICES))
+    assert isinstance(grid, Grid)
+    assert grid.cards == [(card.name, card.image) for card in GRID_CHOICES.cards]
+    assert grid.text == f"{GRID_CHOICES.intro}\n\n{GRID_CHOICES.outro}"
+    assert [b.label for b in grid.buttons] == ["drinks", "sides"]
+
+
+def test_grid_is_uploaded_once_then_resent_by_file_id() -> None:
+    covers = {card.image: _png() for card in GRID_CHOICES.cards}
+    harness = Harness(turn_reply=reply(choices=GRID_CHOICES), covers=covers)
+    harness.send("give me the menu")
+
+    [(method, fields, files)] = harness.client.uploads
+    assert method == "sendPhoto"
+    assert fields["caption"] == f"{GRID_CHOICES.intro}\n\n{GRID_CHOICES.outro}"
+    keyboard = fields["reply_markup"]["inline_keyboard"]
+    assert [row[0]["text"] for row in keyboard] == ["drinks", "sides"]
+    name, picture, mime = files["photo"]
+    assert mime == "image/jpeg"
+    with Image.open(io.BytesIO(picture)) as grid:
+        assert grid.format == "JPEG"
+    assert harness.client.texts() == []  # the text went as the caption
+
+    harness.send("give me the menu")
+    assert len(harness.client.uploads) == 1  # not drawn or uploaded again
+    assert len(harness.client.fetched) == 2
+    [resent] = harness.client.sent("sendPhoto")
+    assert resent["photo"] == "grid-file-id"
+    assert resent["caption"] == fields["caption"]
+
+
+def test_grid_falls_back_to_text_and_buttons_when_no_cover_loads() -> None:
+    harness = Harness(turn_reply=reply(choices=GRID_CHOICES))
+    harness.send("give me the menu")
+    assert harness.client.uploads == []
+    [message] = harness.client.sent()
+    assert message["text"] == f"{GRID_CHOICES.intro}\n\n{GRID_CHOICES.outro}"
+    assert len(message["reply_markup"]["inline_keyboard"]) == 2
+
+
+def test_grid_falls_back_to_text_and_buttons_when_the_upload_fails() -> None:
+    covers = {card.image: _png() for card in GRID_CHOICES.cards}
+    harness = Harness(turn_reply=reply(choices=GRID_CHOICES), covers=covers, failing={"upload"})
+    harness.send("give me the menu")
+    [message] = harness.client.sent()
+    assert "reply_markup" in message
+    assert not any(key.startswith("telegram:grid:") for key in harness.redis.store)
+
+
+def test_build_grid_lays_out_tiles_with_room_for_names() -> None:
+    names = ["desserts + sweet treats", "drinks", "a very long category name that must wrap"]
+    picture = build_grid([(names[0], _png()), (names[1], None), (names[2], b"not an image")])
+    with Image.open(io.BytesIO(picture)) as grid:
+        # 3 cards: 3 columns of 240px tiles with 16px gaps, one row plus its label strip.
+        assert grid.size == (3 * 240 + 4 * 16, 240 + 58 + 2 * 16)
+        pixel = grid.convert("RGB").getpixel((16 + 120, 16 + 120))
+        # the red cover is in the first tile
+        assert isinstance(pixel, tuple) and pixel[0] > 150
+
+
 # --- the Bot API client ---------------------------------------------------------------------
 
 
@@ -329,6 +436,32 @@ def test_client_returns_result_and_never_logs_the_token(caplog: pytest.LogCaptur
     assert json.loads(seen[0].content) == {"chat_id": 1, "text": "hi"}
     assert "Bad Request: nope" in caplog.text
     assert token not in caplog.text
+    client.close()
+
+
+def test_client_upload_sends_a_multipart_form_and_fetch_gets_pictures() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.host == "img.example":
+            if request.url.path == "/ok.png":
+                return httpx.Response(200, content=b"PNG")
+            return httpx.Response(404)
+        return httpx.Response(200, json={"ok": True, "result": {"photo": []}})
+
+    client = TelegramClient("t", transport=httpx.MockTransport(handler))
+    result = client.upload(
+        "sendPhoto",
+        {"chat_id": 1, "caption": "hi", "reply_markup": {"inline_keyboard": []}},
+        {"photo": ("menu.jpg", b"JPEGDATA", "image/jpeg")},
+    )
+    assert result == {"photo": []}
+    body = seen[0].content
+    assert seen[0].headers["content-type"].startswith("multipart/form-data")
+    assert b'{"inline_keyboard": []}' in body and b"JPEGDATA" in body
+    assert client.fetch("https://img.example/ok.png") == b"PNG"
+    assert client.fetch("https://img.example/missing.png") is None
     client.close()
 
 

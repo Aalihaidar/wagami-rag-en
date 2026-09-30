@@ -6,8 +6,9 @@ Telegram posts each update (a guest's message or a tap on one of the bot's butto
 guest's chat id as the session (`telegram:<chat id>`), and sends the reply back through the Bot
 API, laid out like the chat page does (`layOutBody()` in app/static/js/chat.js):
 
-- a list of groups or categories: its text, with a button per name (a tap browses into it, with
-  no understanding call, like a card click on the page, rule R-15);
+- a list of groups or categories: one picture of their covers with each name under its tile
+  (app/telegram_grid.py), its text as the caption and a button per name under it (a tap browses
+  into it, with no understanding call, like a card click on the page, rule R-15);
 - a category's item listing: its opening sentence, the dishes' photos, then its closing question
   with a button per dish ("Tell me about <name>", like a dish card's click);
 - one cited dish: the answer, then the dish's photo with its facts as the caption;
@@ -37,6 +38,7 @@ from redis import Redis
 
 from app.cost_control import CONVERSATION_LIMIT_REPLY
 from app.schemas import CHAT_MESSAGE_MAX_LENGTH, BrowsePick, ChatResponse, CitedItem
+from app.telegram_grid import build_grid
 
 logger = logging.getLogger("app.telegram")
 
@@ -77,6 +79,9 @@ RATE_LIMIT_PER_MINUTE = 10
 # Telegram retries an update it thinks went undelivered; one it has already sent is dropped.
 UPDATE_SEEN_TTL_SECONDS = 24 * 60 * 60
 BUTTON_TTL_SECONDS = 30 * 24 * 60 * 60
+# Telegram's id for an uploaded grid picture, reused for the same list instead of drawing and
+# uploading it again.
+GRID_FILE_ID_TTL_SECONDS = 30 * 24 * 60 * 60
 
 MESSAGE_MAX_LENGTH = 4096  # Bot API limit for a text message
 CAPTION_MAX_LENGTH = 1024  # ... and for a photo's caption
@@ -110,7 +115,17 @@ class Photos:
     photos: list[tuple[str, str]]
 
 
-Outgoing = Text | Photos
+@dataclass(frozen=True)
+class Grid:
+    """A list of groups or categories: the cards' covers in one picture (name, cover URL), with
+    `text` as its caption and `buttons` under it."""
+
+    cards: list[tuple[str, str]]
+    text: str
+    buttons: list[Button]
+
+
+Outgoing = Text | Photos | Grid
 
 
 def session_id_for(chat_id: int) -> str:
@@ -148,10 +163,15 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def _is_absolute(url: str) -> bool:
+    # A picture is fetched by URL (by the Bot API, or by the bot for a grid), so only an
+    # absolute one works: with no IMAGE_BASE_URL (or a relative one, e.g. local /images/menu)
+    # the dish or card goes without.
+    return url.startswith(("https://", "http://"))
+
+
 def _has_photo(item: CitedItem) -> bool:
-    # The Bot API fetches a photo by URL itself, so only an absolute one works: with no
-    # IMAGE_BASE_URL (or a relative one, e.g. local /images/menu) the dish goes without.
-    return item.image.startswith(("https://", "http://"))
+    return _is_absolute(item.image)
 
 
 def _photos(items: list[CitedItem], caption: Callable[[CitedItem], str]) -> list[Outgoing]:
@@ -178,7 +198,13 @@ def layout(reply: ChatResponse) -> list[Outgoing]:
             for card in reply.choices.cards
         ]
         text = f"{reply.choices.intro}\n\n{reply.choices.outro}"
-        return [Text(text, buttons), *_photos(items, _short_caption)]
+        cards = reply.choices.cards
+        first: Outgoing = (
+            Grid([(card.name, card.image) for card in cards], text, buttons)
+            if any(_is_absolute(card.image) for card in cards)
+            else Text(text, buttons)
+        )
+        return [first, *_photos(items, _short_caption)]
     if reply.intro is not None and reply.outro is not None:
         return [
             Text(reply.intro),
@@ -221,10 +247,32 @@ class TelegramClient:
             timeout=httpx.Timeout(15.0, connect=5.0),
             transport=transport,
         )
+        # For the grid's cover pictures (public image storage, not the Bot API).
+        self._images = httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0), transport=transport)
 
     def call(self, method: str, payload: dict[str, Any]) -> Any:
+        return self._request(method, json=payload)
+
+    def upload(
+        self, method: str, fields: dict[str, Any], files: dict[str, tuple[str, bytes, str]]
+    ) -> Any:
+        """A call that sends a file (multipart), e.g. sendPhoto with a picture built here. Nested
+        fields such as reply_markup go as JSON strings, as the Bot API expects in a form."""
+        data = {k: v if isinstance(v, str) else json.dumps(v) for k, v in fields.items()}
+        return self._request(method, data=data, files=files)
+
+    def fetch(self, url: str) -> bytes | None:
         try:
-            body = self._http.post(method, json=payload).json()
+            response = self._images.get(url)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("Picture fetch failed: %s", type(exc).__name__)
+            return None
+        return response.content
+
+    def _request(self, method: str, **kwargs: Any) -> Any:
+        try:
+            body = self._http.post(method, **kwargs).json()
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning("Telegram %s failed: %s", method, type(exc).__name__)
             return None
@@ -235,6 +283,7 @@ class TelegramClient:
 
     def close(self) -> None:
         self._http.close()
+        self._images.close()
 
 
 class TelegramBot:
@@ -326,6 +375,8 @@ class TelegramBot:
         for part in outgoing:
             if isinstance(part, Text):
                 self._send_text(chat_id, part)
+            elif isinstance(part, Grid):
+                self._send_grid(chat_id, part)
             else:
                 self._send_photos(chat_id, part)
 
@@ -352,6 +403,41 @@ class TelegramBot:
                 # Telegram couldn't fetch a picture (or the call failed): the captions still
                 # carry the dishes' names and facts, so send those as text instead.
                 self._send_text(chat_id, Text("\n\n".join(caption for _, caption in chunk)))
+
+    def _send_grid(self, chat_id: int, part: Grid) -> None:
+        """The grid picture with the text as its caption and the buttons under it. Falls back to
+        the text and buttons alone when the text is too long for a caption, no cover could be
+        fetched, or the upload fails."""
+        if len(part.text) > CAPTION_MAX_LENGTH:
+            self._send_text(chat_id, Text(part.text, part.buttons))
+            return
+        fields: dict[str, Any] = {
+            "chat_id": chat_id,
+            "caption": part.text,
+            "reply_markup": {"inline_keyboard": self._keyboard(part.buttons)},
+        }
+        digest = hashlib.sha256(json.dumps(part.cards).encode()).hexdigest()[:32]
+        cache_key = f"telegram:grid:{digest}"
+
+        cached = self._redis.get(cache_key)
+        if cached is not None:
+            file_id = cached.decode() if isinstance(cached, bytes) else str(cached)
+            if self._client.call("sendPhoto", {**fields, "photo": file_id}) is not None:
+                return
+
+        covers = [(name, self._client.fetch(url)) for name, url in part.cards if _is_absolute(url)]
+        sent = None
+        if any(cover is not None for _, cover in covers):
+            picture = build_grid([(name, dict(covers).get(name)) for name, _ in part.cards])
+            sent = self._client.upload(
+                "sendPhoto", fields, {"photo": ("menu.jpg", picture, "image/jpeg")}
+            )
+        if not isinstance(sent, dict):
+            self._send_text(chat_id, Text(part.text, part.buttons))
+            return
+        if photo_sizes := sent.get("photo"):
+            # Sizes come smallest first; any one's file_id re-sends the same photo.
+            self._redis.set(cache_key, photo_sizes[-1]["file_id"], ex=GRID_FILE_ID_TTL_SECONDS)
 
     def _keyboard(self, buttons: list[Button]) -> list[list[dict[str, str]]]:
         return [
