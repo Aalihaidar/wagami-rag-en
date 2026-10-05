@@ -27,7 +27,7 @@ repos:
         # (cluster URL, key lengths, query results) reach a commit.
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.8  # keep in step with the ruff floor in pyproject.toml
+    rev: v0.16.9  # keep in step with the ruff floor in pyproject.toml
     hooks:
       - id: ruff
         args: [--fix]
