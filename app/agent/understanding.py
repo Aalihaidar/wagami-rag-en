@@ -1,6 +1,6 @@
 """Query understanding: one structured LLM call that decides how a guest message is handled
-(greeting, off-topic, menu browsing, a dish/search question, or house policy) and extracts the
-retrieval filters and any menu group/category the guest named.
+(greeting, off-topic, a message in another language, menu browsing, a dish/search question, or
+house policy) and extracts the retrieval filters and any menu group/category the guest named.
 
 Ported from `03_evaluation_groq.ipynb`'s `understand_query()` -- including the
 "(gluten-free recipe)"/"(vegan recipe)" suffix-preservation fix in the prompt
@@ -15,6 +15,7 @@ from typing import Any, Literal, cast
 
 from app.agent import prompts
 from app.agent.catalog import CATALOG_PROPERTIES, MenuCatalog, build_catalog
+from app.agent.language import detect_non_english
 from app.agent.llm import GroqClient, Usage, zero_usage
 from app.retrieval import QueryUnderstanding
 from app.schemas import CHAT_MESSAGE_MAX_LENGTH
@@ -52,11 +53,11 @@ ALLERGEN_VOCAB: dict[str, set[str]] = {
 }
 ALLOWED_ALLERGENS = sorted(set().union(*ALLERGEN_VOCAB.values()))
 
-# How a message is handled. The first three are answered without a search (app/agent/browse.py);
+# How a message is handled. The first four are answered without a search (app/agent/browse.py);
 # "menu" and "faq" go through retrieval and generation. "menu" stays the default for anything
 # the model returns that is not one of these.
-INTENTS = ("greeting", "off_topic", "menu_browse", "menu", "faq")
-Intent = Literal["greeting", "off_topic", "menu_browse", "menu", "faq"]
+INTENTS = ("greeting", "off_topic", "non_english", "menu_browse", "menu", "faq")
+Intent = Literal["greeting", "off_topic", "non_english", "menu_browse", "menu", "faq"]
 NONE = "none"  # the enum sentinel for "no group / no category" (as `dietary` uses for "no diet")
 
 UNDERSTAND_TEMPERATURE = 0.0  # deterministic extraction; the schema already constrains shape/enums
@@ -252,6 +253,9 @@ def understand_query(
 ) -> UnderstandingResult:
     """Single LLM call: classify intent and extract retrieval filters from the question.
 
+    A message that is clearly not English (another script, or the common words of another
+    language, rule C-28) is answered `non_english` right here, with no model call at all.
+
     groq_client=None (no key configured) falls back to a deterministic no-op understanding --
     plain menu search on the raw question, no filters -- so the rest of the pipeline still
     runs end to end without a live key.
@@ -263,6 +267,8 @@ def understand_query(
     a malformed extraction can never fall back to leaking old conversation text into
     `search_query`.
     """
+    if detect_non_english(question) is not None:
+        return {**_plain_understanding(question), "intent": "non_english"}
     if groq_client is None:
         return _plain_understanding(question)
     user_message = f"{context}\n\nGuest's new message: {question}" if context else question
@@ -330,6 +336,11 @@ def parse_understanding(
     # that names a real menu item is searched instead; if it turns out not to be answerable, the
     # generation call's own scope rules still decline it.
     if intent == "off_topic" and category_index.catalog.mentions_menu_item(question):
+        intent = "menu"
+    # The same for another-language verdicts (rule C-29): "yasai gyoza" is not a foreign language,
+    # and a guest turned away for it is worse than one search. This covers the model's verdict
+    # only; the code check (C-28) needs real evidence of another language and stands on its own.
+    if intent == "non_english" and category_index.catalog.mentions_menu_item(question):
         intent = "menu"
     if intent != "menu_browse":
         browse_group = browse_category = None

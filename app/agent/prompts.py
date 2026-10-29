@@ -8,8 +8,8 @@ calling the model, in one place.
   * MENU_TONE / FAQ_TONE    the per-intent tone added to the generation system prompt
   * build_understand_system_prompt()  the query-understanding rules, including the description
     of the knowledge base's structure rendered from the live corpus (FIELD_GUIDE + a MenuCatalog)
-  * GREETING_REPLY, OFF_TOPIC_REPLY and the browse templates  fixed replies for messages that
-    need no search and no second model call (routed by app/agent/graph.py)
+  * GREETING_REPLY, OFF_TOPIC_REPLY, NON_ENGLISH_REPLY and the browse templates  fixed replies for
+    messages that need no search and no second model call (routed by app/agent/graph.py)
 
 Edit wording here and nowhere else: the notebooks import these same objects, so the app and the
 notebooks cannot drift apart. Any edit changes what the model does -- run the tests, then re-run
@@ -252,6 +252,10 @@ OFF_TOPIC_REPLY = (
     "like to know?"
 )
 
+# A message in a language other than English (rule R-18): the demo's menu, FAQ and answers are
+# English only.
+NON_ENGLISH_REPLY = "For now this demo works only with English language."
+
 # {options} is a bulleted list, one option per line, built by app/agent/browse.py.
 MENU_OVERVIEW_REPLY = (
     "Our menu is organised into these categories:\n{options}\n\n"
@@ -273,8 +277,9 @@ AMBIGUOUS_CATEGORY_REPLY = (
 
 _UNDERSTAND_INTRO = """
 You turn one guest message for a restaurant chatbot into a structured query-understanding
-result. It decides how the message is handled -- greeted, politely declined, answered from the
-menu's own structure, searched for, or looked up as house policy -- and carries the filters
+result. It decides how the message is handled -- told the demo is English only, greeted,
+politely declined, answered from the menu's own structure, searched for, or looked up as house
+policy -- and carries the filters
 used to search a knowledge base. Return only the JSON described by the response schema -- no
 extra text.
 """.strip()
@@ -282,6 +287,13 @@ extra text.
 _UNDERSTAND_FIELDS = """
 Fields:
 - intent: how the message is handled -- exactly one of:
+  "non_english" -- the message is written in a language other than English (Arabic, Russian,
+  Spanish, French, Chinese, ...), whatever it says or asks, a greeting included. Decide this
+  first, by the language of the guest's new message and not by its topic. English is never
+  "non_english", even with typos, slang or borrowed words: names of dishes and drinks from other
+  languages ("katsu curry", "yasai gyoza", "sake") are menu words, and a message with no words
+  in any language (numbers, emoji, a dish name alone) is not a foreign language. When in doubt,
+  it is not "non_english": a wrong "non_english" turns a real guest away.
   "greeting" -- the whole message is a greeting or pleasantry with no question ("hi", "hello",
   "good evening", "how are you", "thanks"). A greeting followed by a question is classified by
   the question.

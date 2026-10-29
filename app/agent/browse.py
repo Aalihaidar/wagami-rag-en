@@ -1,11 +1,12 @@
 """Replies that need no search and no second model call.
 
-Three kinds of message are answered straight from a fixed reply or from the MenuCatalog:
-a greeting, an off-topic message, and browsing the menu ("what's on the menu?", "show me the
-drinks", "cocktails"). The query-understanding call decides which one a message is (and which
-group or category a browse names); this module turns that decision into the reply. Because the
-lists come from the corpus, they can never name a category that does not exist, and because no
-retrieval runs there is nothing to rank or hallucinate.
+Four kinds of message are answered straight from a fixed reply or from the MenuCatalog:
+a greeting, an off-topic message, a message in a language other than English, and browsing the
+menu ("what's on the menu?", "show me the drinks", "cocktails"). The query-understanding call
+decides which one a message is (and which group or category a browse names); this module turns
+that decision into the reply. Because the lists come from the corpus, they can never name a
+category that does not exist, and because no retrieval runs there is nothing to rank or
+hallucinate.
 
 When a browse lists groups or categories, the reply also comes cut into an opening sentence, a
 picture card per name -- the cover picture in that group's or category's own image folder (see
@@ -38,11 +39,12 @@ from app.agent.prompts import (
     GREETING_REPLY,
     GROUP_REPLY,
     MENU_OVERVIEW_REPLY,
+    NON_ENGLISH_REPLY,
     OFF_TOPIC_REPLY,
 )
 
 # Intents answered without retrieval or generation.
-DIRECT_INTENTS = frozenset({"greeting", "off_topic", "menu_browse"})
+DIRECT_INTENTS = frozenset({"greeting", "off_topic", "non_english", "menu_browse"})
 
 
 @dataclass(frozen=True)
@@ -198,6 +200,8 @@ def direct_answer(understanding: Mapping[str, Any], catalog: MenuCatalog) -> Dir
         return DirectAnswer(GREETING_REPLY)
     if intent == "off_topic":
         return DirectAnswer(OFF_TOPIC_REPLY)
+    if intent == "non_english":
+        return DirectAnswer(NON_ENGLISH_REPLY)
     return browse_answer(
         catalog, understanding.get("browse_group"), understanding.get("browse_category")
     )
