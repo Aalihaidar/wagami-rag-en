@@ -1,3 +1,4 @@
+import json
 import math
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -7,6 +8,8 @@ import httpx
 import pytest
 
 from app.retrieval import (
+    TOP_N,
+    K,
     MenuRow,
     QueryUnderstanding,
     RetrievalTool,
@@ -149,7 +152,7 @@ class FakeKB:
 
 
 def _no_rerank(
-    query: str, rows: list[MenuRow], *, top_n: int = 6
+    query: str, rows: list[MenuRow], *, top_n: int = TOP_N
 ) -> tuple[list[dict[str, Any]], int]:
     """Deterministic stand-in for Cohere rerank: hybrid order, real scores."""
     return [{"row": o, "rerank": o["score"], "hybrid": o["score"]} for o in rows[:top_n]], 0
@@ -263,6 +266,36 @@ def test_rerank_posts_to_cohere_and_maps_results_back_to_rows(
     assert hits[0]["hybrid"] == 0.7
     assert units == 1
     assert seen[0].headers["Authorization"] == "Bearer cohere-key"
+
+
+def test_the_reranker_keeps_ten_of_twenty_candidates() -> None:
+    """Rule C-10: hybrid search fetches 20 rows, the reranker keeps the best 10."""
+    assert (K, TOP_N) == (20, 10)
+
+
+def test_rerank_asks_cohere_for_the_top_ten_by_default_and_never_more_than_it_has(
+    _no_real_sleeping: list[float],
+) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.8}]})
+
+    tool = _rerank_tool(handler)
+    tool.rerank("q", [make_row(f"dish {i}") for i in range(20)])
+    tool.rerank("q", [make_row(f"dish {i}") for i in range(4)])
+
+    assert [body["top_n"] for body in bodies] == [10, 4]
+    assert len(bodies[0]["documents"]) == 20
+
+
+def test_the_hybrid_order_fallback_also_keeps_ten(_no_real_sleeping: list[float]) -> None:
+    rows = [make_row(f"dish {i}", score=1 - i / 100) for i in range(15)]
+
+    hits, _ = _rerank_tool(lambda r: httpx.Response(401, json={})).rerank("q", rows)
+
+    assert [h["row"]["properties"]["name"] for h in hits] == [f"dish {i}" for i in range(10)]
 
 
 def test_rerank_retries_a_429_then_succeeds(_no_real_sleeping: list[float]) -> None:

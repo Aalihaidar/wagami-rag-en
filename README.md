@@ -42,6 +42,7 @@ it is handled:
 | --- | --- | --- |
 | "hello" | fixed greeting | 1 |
 | something unrelated to the restaurant | fixed, polite redirect | 1 |
+| a message in a language other than English | fixed reply: for now this demo works only with English language | 0 or 1: a clearly foreign message (another script, or common words of another language) is caught in code before the model is asked |
 | "what's on the menu?", "show me the drinks", "sides" | the menu's groups → categories → items, straight from the corpus: groups and categories as picture cards (the name and a dedicated picture for it), items each described with a card and its own dish photo — no search | 1 |
 | a dish, ingredient, price, allergy, or a filtered question ("vegan starters under £6") | hybrid search → rerank → grounded answer | 2 |
 | hours, bookings, delivery, payments | the same search path over the FAQ rows | 2 |

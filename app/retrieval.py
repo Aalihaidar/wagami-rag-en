@@ -64,7 +64,7 @@ FIELDS = [
 
 ALPHA = 0.75
 K = 20
-TOP_N = 6
+TOP_N = 10
 GATE = 0.15
 RERANK_MODEL = "rerank-v3.5"
 COHERE_MAX_RPM = 15.0  # client-side pacing cap for rerank() -- edit to match your key's quota

@@ -7,9 +7,9 @@ from langchain_core.runnables import RunnableConfig
 from app.agent.catalog import NUTRITION_FIELDS, build_catalog
 from app.agent.graph import build_graph
 from app.agent.llm import LLMResponse, Usage
-from app.agent.prompts import GREETING_REPLY, OFF_TOPIC_REPLY
+from app.agent.prompts import GREETING_REPLY, NON_ENGLISH_REPLY, OFF_TOPIC_REPLY
 from app.agent.understanding import CategoryIndex
-from app.retrieval import RetrievalTool
+from app.retrieval import TOP_N, RetrievalTool
 from app.timing import track_timings
 
 
@@ -113,7 +113,9 @@ class FakeGroqClient(StreamsViaCall):
         return {"text": text, "usage": usage}
 
 
-def _no_rerank(query: str, rows: list[Any], *, top_n: int = 6) -> tuple[list[dict[str, Any]], int]:
+def _no_rerank(
+    query: str, rows: list[Any], *, top_n: int = TOP_N
+) -> tuple[list[dict[str, Any]], int]:
     return [{"row": o, "rerank": o["score"], "hybrid": o["score"]} for o in rows[:top_n]], 0
 
 
@@ -615,6 +617,34 @@ def test_an_off_topic_message_gets_the_fixed_redirect() -> None:
 
     assert final["answer"] == OFF_TOPIC_REPLY
     assert len(client.calls) == 1
+
+
+def test_a_message_in_another_script_is_answered_by_the_code_check_with_no_llm_call() -> None:
+    # The model is never asked (rule C-28): its answers would be a greeting if it were.
+    graph, client = direct_route_graph(understanding_for(intent="greeting"))
+
+    # cspell:disable-next-line
+    final = graph.invoke({"question": "مرحبا، ما هي الأطباق النباتية؟"})
+
+    assert final["answer"] == NON_ENGLISH_REPLY
+    assert client.calls == []
+    assert "search_result" not in final
+    assert final["cited_items"] == []
+    assert final["usage"]["total_tokens"] == 0
+
+
+def test_a_language_the_code_check_does_not_know_is_left_to_the_model() -> None:
+    graph, client = direct_route_graph(understanding_for(intent="non_english"))
+
+    # Finnish: a Latin-script language with no word list here, so the model decides (U-23).
+    # cspell:disable-next-line
+    final = graph.invoke({"question": "Onko teillä kasvisruokaa?"})
+
+    assert final["answer"] == NON_ENGLISH_REPLY
+    assert len(client.calls) == 1  # only the understanding call: no search, no generation
+    assert "search_result" not in final
+    assert final["cited_items"] == []
+    assert final["usage"]["generate"]["total_tokens"] == 0
 
 
 def test_a_general_menu_question_lists_the_groups() -> None:

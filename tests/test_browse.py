@@ -9,7 +9,7 @@ from app.agent.browse import (
     is_known_pick,
 )
 from app.agent.catalog import NUTRITION_FIELDS, MenuCatalog, build_catalog
-from app.agent.prompts import GREETING_REPLY, OFF_TOPIC_REPLY
+from app.agent.prompts import GREETING_REPLY, NON_ENGLISH_REPLY, OFF_TOPIC_REPLY
 
 
 def _row(name: str, path: list[str]) -> dict:
@@ -130,8 +130,18 @@ def test_direct_reply_reads_the_browse_fields_off_the_understanding(catalog: Men
     assert direct_reply(understanding, catalog).startswith("In drinks we have")
 
 
-def test_only_greeting_off_topic_and_browse_skip_retrieval() -> None:
-    assert {"greeting", "off_topic", "menu_browse"} == DIRECT_INTENTS
+def test_only_greeting_off_topic_non_english_and_browse_skip_retrieval() -> None:
+    assert {"greeting", "off_topic", "non_english", "menu_browse"} == DIRECT_INTENTS
+
+
+def test_a_message_in_another_language_gets_the_fixed_english_only_reply(
+    catalog: MenuCatalog,
+) -> None:
+    assert direct_reply({"intent": "non_english"}, catalog) == NON_ENGLISH_REPLY
+    # Rule R-18 / D-07: the wording the demo's owner asked for, and nothing else.
+    assert NON_ENGLISH_REPLY == "For now this demo works only with English language."
+    answer = direct_answer({"intent": "non_english"}, catalog)
+    assert answer.cards == [] and answer.choices is None
 
 
 # ---- item listings: described in the text, with a card each ------------------------------------
