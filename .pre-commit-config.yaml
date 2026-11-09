@@ -27,14 +27,14 @@ repos:
         # (cluster URL, key lengths, query results) reach a commit.
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.1  # keep in step with the ruff floor in pyproject.toml
+    rev: v0.17.3  # keep in step with the ruff floor in pyproject.toml
     hooks:
       - id: ruff
         args: [--fix]
       - id: ruff-format
 
   - repo: https://github.com/compilerla/conventional-pre-commit
-    rev: v4.4.0
+    rev: v4.5.0
     hooks:
       - id: conventional-pre-commit
         stages: [commit-msg]
