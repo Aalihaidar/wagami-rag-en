@@ -1,5 +1,6 @@
 /* Light palette (default). Dark palette redefines the same tokens below under
-   prefers-color-scheme -- no color is ever defined only inside that block.
+   prefers-color-scheme (or data-theme="dark", set by a host such as Telegram) -- no color is
+   ever defined only inside those blocks.
    Built around the requested #016b5d primary (a deep emerald/teal) -- neutrals
    given a cool, slightly green-gray undertone rather than a warm one so they
    read as one deliberate system with the accent instead of clashing against
@@ -61,6 +62,31 @@
     --allergen-may-bg: #3a2f14;
     --allergen-may-text: #ffd479;
   }
+}
+
+/* The same dark palette, forced: a host that knows the guest's theme better than the device
+   does sets data-theme="dark" on <html> (static/js/telegram.js does, for Telegram's own
+   theme). Keep these tokens identical to the block above -- tests/test_main.py checks it. */
+:root[data-theme="dark"] {
+  --bg: #0e1613;
+  --surface: #16211e;
+  --border: #2b3733;
+  --text: #eef3f1;
+  --text-muted: #9db0ac;
+  --accent: #1f9d85;
+  --accent-text: #06231e;
+  --assistant-bubble: #16211e;
+  --guest-bubble: #1f9d85;
+  --guest-bubble-text: #06231e;
+  --error-bubble: #3a2020;
+  --error-border: #ef5350;
+  --focus-ring: #7db2e8;
+  --dietary-bg: #123832;
+  --dietary-text: #6fe0c6;
+  --allergen-contains-bg: #3a2020;
+  --allergen-contains-text: #ff8a80;
+  --allergen-may-bg: #3a2f14;
+  --allergen-may-text: #ffd479;
 }
 
 * {

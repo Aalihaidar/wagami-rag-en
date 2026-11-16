@@ -47,6 +47,17 @@ class Settings(BaseSettings):
     # /chat response's cited items. Empty (default) leaves cited images as bare filenames.
     image_base_url: str = ""
 
+    # Telegram bot (a second chat surface next to the web page, same agent). Empty token (the
+    # default) leaves the bot off and its webhook route answering 404. The secret is the value
+    # Telegram sends back in X-Telegram-Bot-Api-Secret-Token on every update, so only Telegram
+    # can drive the bot.
+    telegram_bot_token: str = ""
+    telegram_webhook_secret: str = ""
+    # The chat page's own public https URL: turns it into a Telegram Mini App -- /start gets an
+    # "open" button for it, and the page may be framed by Telegram's own domains (see
+    # app/main.py's security_headers). Empty leaves /start as plain text.
+    telegram_web_app_url: str = ""
+
     # Section D (rate limiting & cost control) -- tune to your actual budget/provider limits.
     daily_token_limit: int = DAILY_TOKEN_LIMIT_DEFAULT
     monthly_token_limit: int = MONTHLY_TOKEN_LIMIT_DEFAULT

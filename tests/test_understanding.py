@@ -379,7 +379,7 @@ def test_an_intent_the_model_invents_falls_back_to_menu() -> None:
     assert parse(intent="chitchat")["intent"] == "menu"
 
 
-@pytest.mark.parametrize("intent", ["greeting", "off_topic", "menu", "faq"])
+@pytest.mark.parametrize("intent", ["greeting", "off_topic", "non_english", "menu", "faq"])
 def test_the_other_intents_pass_through(intent: str) -> None:
     assert parse(intent=intent)["intent"] == intent
 
@@ -526,6 +526,102 @@ def test_the_prompt_tells_the_model_to_prefer_menu_over_off_topic_when_unsure() 
 
     assert "Use it only when the message is clearly unrelated" in prompt
     assert 'a wrong "off_topic" turns a real guest away' in prompt
+
+
+def test_the_prompt_tells_the_model_what_is_and_is_not_another_language() -> None:
+    prompt = " ".join(
+        build_understand_system_prompt(browse_index()).split()
+    )  # collapse the hand-wrapping
+
+    assert '"non_english" -- the message is written in a language other than English' in prompt
+    # Borrowed dish names are menu words, and a doubt goes the other way (rule U-23).
+    assert '"katsu curry", "yasai gyoza", "sake"' in prompt
+    assert 'a wrong "non_english" turns a real guest away' in prompt
+    # It is decided first, before the greeting and off-topic intents.
+    assert prompt.index('"non_english" --') < prompt.index('"greeting" --')
+
+
+# cspell:disable-next-line
+FINNISH_MESSAGE = "onko teilla kasvisruokaa"  # a language the code check has no word list for
+# cspell:disable-next-line
+FRENCH_MESSAGE = "Bonjour, avez-vous des plats végétariens ?"
+
+
+def test_the_model_saying_non_english_is_overruled_when_the_message_names_a_menu_item() -> None:
+    """Rule C-29, the twin of C-19: a dish name is not a foreign language, and a guest turned
+    away for it is worse than one search."""
+    result = parse_understanding(
+        understanding_json(intent="non_english"), USAGE, "do you have the roku g+t", browse_index()
+    )
+
+    assert result["intent"] == "menu"
+
+
+def test_non_english_stands_when_no_menu_item_is_named() -> None:
+    result = parse_understanding(
+        understanding_json(intent="non_english"),
+        USAGE,
+        FINNISH_MESSAGE,
+        browse_index(),
+    )
+
+    assert result["intent"] == "non_english"
+
+
+def test_non_english_is_left_alone_when_there_is_no_catalog_to_check_against() -> None:
+    no_catalog = CategoryIndex(categories=["gyoza"], siblings={}, alcoholic_only=set())
+    result = parse_understanding(
+        understanding_json(intent="non_english"), USAGE, "do you have the roku g+t", no_catalog
+    )
+
+    assert result["intent"] == "non_english"
+
+
+class NeverCalledClient:
+    """A Groq client that fails the test if the understanding call reaches it."""
+
+    def call(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the code check must answer before any model call")
+
+
+@pytest.mark.parametrize("groq_client", [None, NeverCalledClient()])
+def test_a_clearly_foreign_message_is_answered_with_no_model_call(groq_client: Any) -> None:
+    result = understand_query(
+        FRENCH_MESSAGE,
+        category_index=browse_index(),
+        groq_client=groq_client,
+        model="m",
+        context="Recent conversation so far:\nGuest: hi",
+    )
+
+    assert result["intent"] == "non_english"
+    assert result["usage"]["total_tokens"] == 0
+    assert result["browse_group"] is None and result["browse_category"] is None
+
+
+def test_an_english_message_with_a_foreign_dish_name_still_reaches_the_model() -> None:
+    calls: list[str] = []
+
+    class Recorder:
+        def call(self, system: str, user: str, **kwargs: Any) -> Any:
+            calls.append(user)
+            return {"text": understanding_json(intent="menu"), "usage": USAGE}
+
+    understand_query(
+        "do you have yasai gyoza?",
+        category_index=browse_index(),
+        groq_client=Recorder(),  # type: ignore[arg-type]
+        model="m",
+    )
+
+    assert calls == ["do you have yasai gyoza?"]
+
+
+def test_a_non_english_message_keeps_no_browse_target() -> None:
+    result = parse(intent="non_english", browse_group="drinks", browse_category="cocktails")
+
+    assert result["intent"] == "non_english"
+    assert (result["browse_group"], result["browse_category"]) == (None, None)
 
 
 # ---- resolved_question: the message with "it" filled in (rule U-22, guarantee C-22) --------------

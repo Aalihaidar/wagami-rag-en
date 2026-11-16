@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -54,6 +55,7 @@ from app.schemas import (
     CitedItem,
     SessionResponse,
 )
+from app.telegram_bot import CHAT_DISABLED_REPLY, TelegramBot, TelegramClient
 from app.timing import timed, track_timings
 
 settings = get_settings()
@@ -86,6 +88,21 @@ CSP_IMG_SRC = (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """The Telegram Bot API client (only when TELEGRAM_BOT_TOKEN is set), around the backends
+    every chat surface shares."""
+    app.state.telegram_client = (
+        TelegramClient(settings.telegram_bot_token) if settings.telegram_bot_token else None
+    )
+    try:
+        async with _connect_backends(app):
+            yield
+    finally:
+        if app.state.telegram_client is not None:
+            app.state.telegram_client.close()
+
+
+@asynccontextmanager
+async def _connect_backends(app: FastAPI) -> AsyncIterator[None]:
     """Connect Weaviate/Redis once at startup and build the compiled agent graph, stored on
     app.state -- never reconnected per request (Section A of the app/deployment plan).
 
@@ -159,11 +176,22 @@ async def security_headers(request: Request, call_next):  # type: ignore[no-unty
     """
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = (
-        f"default-src 'self'; frame-ancestors 'none'; {CSP_IMG_SRC}; style-src 'self'"
-    )
+    if settings.telegram_web_app_url:
+        # The Mini App: Telegram Web shows the chat page in a frame of its own domains, which
+        # the page otherwise refuses. frame-ancestors names exactly those; X-Frame-Options has no
+        # way to (and would win over it in some browsers), so it is left off in this case. The
+        # SDK script (static/js/telegram.js, loaded only inside Telegram) comes from telegram.org.
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; frame-ancestors https://web.telegram.org "
+            f"https://*.telegram.org; {CSP_IMG_SRC}; style-src 'self'; "
+            "script-src 'self' https://telegram.org"
+        )
+    else:
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = (
+            f"default-src 'self'; frame-ancestors 'none'; {CSP_IMG_SRC}; style-src 'self'"
+        )
     if settings.app_env == "production":
         # Only meaningful over HTTPS, which is what production actually runs behind (Render);
         # sending it in dev over plain HTTP would just be inert noise.
@@ -621,6 +649,70 @@ async def chat_stream(
         # until the stream ends, defeating the point.
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+TELEGRAM_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
+
+
+@app.post("/telegram/webhook", include_in_schema=False)
+async def telegram_webhook(request: Request, background_tasks: BackgroundTasks) -> dict[str, bool]:
+    """Where Telegram posts each update for the bot (app/telegram_bot.py). 404 while the bot is
+    off (no TELEGRAM_BOT_TOKEN), so the route doesn't even show it exists; 403 unless the request
+    carries the secret given to setWebhook, which only Telegram knows. Otherwise it answers 200
+    at once and handles the update after the response: Telegram re-sends an update it gets no
+    timely answer for, and a chat turn can take longer than it waits."""
+    if request.app.state.telegram_client is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    sent_secret = request.headers.get(TELEGRAM_SECRET_HEADER, "").encode()
+    expected = settings.telegram_webhook_secret.encode()
+    if not expected or not secrets.compare_digest(sent_secret, expected):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        update = await request.json()
+    except ValueError:
+        update = None
+    if isinstance(update, dict):
+        background_tasks.add_task(_handle_telegram_update, request.app, update)
+    return {"ok": True}
+
+
+async def _handle_telegram_update(app: FastAPI, update: dict[str, Any]) -> None:
+    """One Telegram update, under the same concurrency cap as /chat. Chat not configured (no
+    graph) means there's nothing to answer with: the update is dropped, as /chat would 503."""
+    graph, redis_client, checkpointer = (
+        app.state.graph,
+        app.state.redis_client,
+        app.state.checkpointer,
+    )
+    if graph is None or redis_client is None or checkpointer is None:
+        logger.warning("Telegram update dropped: chat is not configured")
+        return
+
+    def run_turn(session_id: str, message: str, browse: BrowsePick | None) -> ChatResponse:
+        if not settings.chat_enabled:
+            return ChatResponse(session_id=session_id, answer=CHAT_DISABLED_REPLY, cited_items=[])
+        with track_timings() as timings, timed("turn"):
+            reply = _run_chat_turn(graph, redis_client, session_id, message, browse)
+        _log_turn_timings(timings)
+        return _build_chat_response(session_id, reply)
+
+    bot = TelegramBot(
+        app.state.telegram_client,
+        redis_client,
+        run_turn,
+        checkpointer.delete_thread,
+        settings.telegram_web_app_url,
+    )
+    if not await _try_acquire_chat_slot():
+        await run_in_threadpool(bot.reply_busy, update)
+        return
+    try:
+        await run_in_threadpool(bot.handle, update)
+    except Exception:
+        # Runs after the response, so nothing else would log it with this context.
+        logger.exception("Telegram update failed")
+    finally:
+        await _release_chat_slot()
 
 
 @app.post("/session", response_model=SessionResponse)
