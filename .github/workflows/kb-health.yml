@@ -1,7 +1,9 @@
 name: Knowledge base health
 
-# Every Monday, ask the live Weaviate Cloud cluster one fixed question and fail loudly if the
-# cluster, the collection or the embedding key has gone away. No LLM is called.
+# Every Monday, ask the live Weaviate Cloud cluster one fixed question and write one small key to
+# the Redis database, and fail loudly if the cluster, the collection, the embedding key or Redis
+# has gone away. The weekly Redis write also keeps a free hosted Redis database from being removed
+# for inactivity. No LLM is called.
 on:
   schedule:
     - cron: "0 7 * * 1" # Mondays 07:00 UTC
@@ -27,9 +29,10 @@ jobs:
           enable-cache: true
           cache-suffix: kb-health
       - run: uv sync --frozen --no-dev
-      - name: Ask the default question
+      - name: Ask the default question and keep Redis active
         env:
           WEAVIATE_URL: ${{ secrets.WEAVIATE_URL }}
           WEAVIATE_READ_API_KEY: ${{ secrets.WEAVIATE_READ_API_KEY }}
           EMBEDDING_API_KEY: ${{ secrets.EMBEDDING_API_KEY }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
         run: uv run --no-dev python scripts/check_knowledge_base.py
