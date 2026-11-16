@@ -31,7 +31,7 @@ services:
     type: web
     runtime: image
     plan: free
-    region: oregon
+    region: frankfurt
     image:
       url: ghcr.io/aalihaidar/wagami-rag-en:staging
     healthCheckPath: /healthz
@@ -72,7 +72,7 @@ services:
     type: web
     runtime: image
     plan: free
-    region: oregon
+    region: frankfurt
     image:
       url: ghcr.io/aalihaidar/wagami-rag-en:latest
     healthCheckPath: /healthz
