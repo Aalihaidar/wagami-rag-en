@@ -53,7 +53,15 @@ open a `develop → main` release PR.
 
 ## 2. GitHub Rulesets (apply in the UI)
 
-Rulesets replace classic branch protection. Create **two**.
+Rulesets replace classic branch protection. Create **two** (plus a tag ruleset).
+
+Ready-made JSON for all three lives in [`rulesets/`](rulesets/): in
+**Settings → Rules → Rulesets → New ruleset → Import a ruleset**, import
+`develop-protect.json`, `main-protect.json` and `tags-protect.json`. They use
+0 required approvals (solo setup) and an empty bypass list; raise the approval
+count on `main` once there is a second reviewer. Do not add the `update` rule
+to a branch ruleset: it blocks merging pull requests, so it belongs only in the
+tag ruleset.
 
 ### Ruleset: `protect-main`
 
@@ -64,14 +72,14 @@ Rulesets replace classic branch protection. Create **two**.
 | Bypass list | *empty* (not even repo admins — use a PR) |
 | **Restrict deletions** | ✅ |
 | **Block force pushes** | ✅ |
-| **Require linear history** | ✅ if you squash-merge; ❌ if you merge-commit `develop → main` |
+| **Require linear history** | ❌ (merge commits are used, so leave it off) |
 | **Require a pull request before merging** | ✅ |
 | &nbsp;&nbsp;Required approvals | **1** (or more) |
 | &nbsp;&nbsp;Dismiss stale approvals on new commits | ✅ |
 | &nbsp;&nbsp;Require review from Code Owners | ✅ (uses [`CODEOWNERS`](CODEOWNERS)) |
 | &nbsp;&nbsp;Require approval of the most recent push | ✅ |
 | &nbsp;&nbsp;Require conversation resolution | ✅ |
-| &nbsp;&nbsp;Allowed merge methods | **Merge** (keeps `develop` history) or **Squash** — pick one |
+| &nbsp;&nbsp;Allowed merge methods | **Merge** only (no squash, no rebase) |
 | **Require status checks to pass** | ✅ |
 | &nbsp;&nbsp;Require branches up to date before merging | ✅ |
 | &nbsp;&nbsp;Required checks | **`ci-passed`** and **`verify-pr-source`** |
@@ -93,7 +101,7 @@ a **required status check** above is what makes that enforcement binding.
 | **Restrict deletions** | ✅ |
 | **Block force pushes** | ✅ |
 | **Require a pull request before merging** | ✅ (1 approval; Code Owners ✅) |
-| &nbsp;&nbsp;Allowed merge methods | **Squash** (tidy integration history) |
+| &nbsp;&nbsp;Allowed merge methods | **Merge** only (no squash, no rebase) |
 | **Require status checks to pass** | ✅ → **`ci-passed`**; require up to date ✅ |
 
 > Solo for now? Keep "Require a pull request" on but set **0** approvals on
