@@ -142,7 +142,7 @@ manual PR (search `.github/workflows/` for `runs-on:`).
 ## 4. Build & deploy — [`workflows/docker.yml`](workflows/docker.yml)
 
 `workflow_run` after CI succeeds on `main` **or** `develop` (or manual
-`workflow_dispatch`) → build one multi-arch image → push to GHCR with
+`workflow_dispatch`) → build one `linux/amd64` image (Render's platform; the arm64 build is commented out in the workflow) → push to GHCR with
 provenance + SBOM → Trivy scan → SARIF to the Security tab → trigger the
 matching Render deploy hook. The build runs only for a green CI run
 triggered by a **push** in this repository: because both branches are

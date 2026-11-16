@@ -116,8 +116,10 @@ jobs:
             echo "sha=$(git rev-parse HEAD)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      # QEMU only emulates other CPU architectures, so it is needed just for the linux/arm64 build
+      # that is switched off below. Re-enable both together.
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -149,7 +151,12 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.prod
-          platforms: linux/amd64,linux/arm64
+          # Render runs linux/amd64 only, so only that is built. The linux/arm64 build is switched off:
+          # it compiles native Python packages (orjson, grpcio, ...) under QEMU emulation, which
+          # ran past the 30-minute job limit after a lockfile change. To build it again, restore
+          # the line below and the QEMU step above (a native arm64 runner would avoid the emulation).
+          platforms: linux/amd64
+          # platforms: linux/amd64,linux/arm64
           push: >-
             ${{
               github.event_name != 'workflow_dispatch' ||
@@ -201,7 +208,7 @@ jobs:
             echo "| **Digest** | \`$DIGEST\` |"
             # metadata-action lists one tag per line; keep them in one table cell.
             echo "| **Tags** | \`${TAGS//$'\n'/, }\` |"
-            echo "| **Platforms** | \`linux/amd64, linux/arm64\` |"
+            echo "| **Platforms** | \`linux/amd64\` |"
             echo "| **Commit** | \`$COMMIT\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
