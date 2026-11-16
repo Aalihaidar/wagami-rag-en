@@ -5,14 +5,14 @@ import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from langchain_core.runnables import RunnableConfig
@@ -109,46 +109,78 @@ async def _connect_backends(app: FastAPI) -> AsyncIterator[None]:
     Skips real connections entirely when Weaviate isn't configured (empty WEAVIATE_URL /
     WEAVIATE_READ_API_KEY -- e.g. CI, or a checkout with no .env secrets yet): /healthz still
     works, and /chat + /session 503 instead of the app failing to start.
+
+    A backend that is configured but unreachable (a wrong URL, a deleted database) is treated the
+    same way: the failure is logged in full, remembered on `app.state.backends` for /readyz, and
+    the app still starts, so the host sees a running service and /readyz names what is down
+    instead of a crash loop. The trade-off is that nothing reconnects by itself -- once the
+    backend is fixed, restart or redeploy the service.
     """
     app.state.graph = None
     app.state.checkpointer = None
     app.state.redis_client = None
+    backends = {"weaviate": "not configured", "redis": "not configured", "agent": "not started"}
+    app.state.backends = backends
     if not (settings.weaviate_url and settings.weaviate_read_api_key):
         yield
         return
 
-    weaviate_client = connect(settings)
-    redis_client = Redis.from_url(settings.redis_url)
-    retrieval_tool: RetrievalTool | None = None
-    groq_client: GroqClient | None = None
-    try:
-        kb = weaviate_client.collections.get("KnowledgeBase")
-        retrieval_tool = RetrievalTool(kb=kb, cohere_api_key=settings.embedding_api_key)
-        category_index = load_category_index(kb)
-        groq_key_pool = load_groq_key_pool(settings.groq_api_key)
-        groq_client = (
-            GroqClient(settings.groq_api_key, key_pool=groq_key_pool) if groq_key_pool else None
-        )
-        app.state.redis_client = redis_client
-        with build_checkpointer(settings.redis_url) as checkpointer:
-            app.state.checkpointer = checkpointer
-            app.state.graph = build_graph(
-                retrieval_tool=retrieval_tool,
-                category_index=category_index,
-                groq_client=groq_client,
-                understand_model=settings.understand_model,
-                generation_model=settings.generation_model,
-                checkpointer=checkpointer,
-            )
-            yield
-    finally:
-        # The keep-alive HTTP pools behind Cohere rerank and Groq.
-        if retrieval_tool is not None:
-            retrieval_tool.close()
-        if groq_client is not None:
-            groq_client.close()
-        weaviate_client.close()
-        redis_client.close()
+    # Everything opened below is closed on shutdown, in reverse order, even after a failure.
+    with ExitStack() as cleanup:
+        retrieval_tool: RetrievalTool | None = None
+        category_index = None
+        try:
+            weaviate_client = connect(settings)
+            cleanup.callback(weaviate_client.close)
+            kb = weaviate_client.collections.get("KnowledgeBase")
+            retrieval_tool = RetrievalTool(kb=kb, cohere_api_key=settings.embedding_api_key)
+            # The keep-alive HTTP pool behind Cohere rerank.
+            cleanup.callback(retrieval_tool.close)
+            category_index = load_category_index(kb)
+            backends["weaviate"] = "ok"
+        except Exception as exc:  # noqa: BLE001 - any failure here means no knowledge base
+            _record_backend_failure(backends, "weaviate", "Weaviate", exc)
+
+        redis_client = Redis.from_url(settings.redis_url)
+        cleanup.callback(redis_client.close)
+        checkpointer = None
+        try:
+            checkpointer = cleanup.enter_context(build_checkpointer(settings.redis_url))
+            backends["redis"] = "ok"
+        except Exception as exc:  # noqa: BLE001 - any failure here means no conversation memory
+            _record_backend_failure(backends, "redis", "Redis", exc)
+
+        if retrieval_tool is not None and category_index is not None and checkpointer is not None:
+            try:
+                groq_key_pool = load_groq_key_pool(settings.groq_api_key)
+                groq_client = (
+                    GroqClient(settings.groq_api_key, key_pool=groq_key_pool)
+                    if groq_key_pool
+                    else None
+                )
+                if groq_client is not None:
+                    cleanup.callback(groq_client.close)
+                app.state.graph = build_graph(
+                    retrieval_tool=retrieval_tool,
+                    category_index=category_index,
+                    groq_client=groq_client,
+                    understand_model=settings.understand_model,
+                    generation_model=settings.generation_model,
+                    checkpointer=checkpointer,
+                )
+                app.state.redis_client = redis_client
+                app.state.checkpointer = checkpointer
+                backends["agent"] = "ok"
+            except Exception as exc:  # noqa: BLE001 - the graph could not be built
+                _record_backend_failure(backends, "agent", "Agent graph", exc)
+        yield
+
+
+def _record_backend_failure(backends: dict[str, str], key: str, label: str, exc: Exception) -> None:
+    """Log the whole failure (the host's private logs may name the host it could not reach) and
+    keep only the error type for /readyz, which anyone can open."""
+    logger.exception("%s is unavailable at startup; chat is off until a restart", label)
+    backends[key] = f"error: {type(exc).__name__}"
 
 
 app = FastAPI(
@@ -285,7 +317,23 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
+    """Liveness only: the process is up. Always 200, so the host never restarts the service
+    because a backend is down -- /readyz says what is."""
     return {"status": "ok"}
+
+
+@app.get("/readyz", include_in_schema=False)
+def readyz(request: Request) -> JSONResponse:
+    """Readiness: 200 when chat can answer, 503 with the state of each backend when it cannot.
+
+    Only the backend name and the error type are shown (never a message, which can name a host);
+    the full error is in the service log from startup."""
+    backends = dict(getattr(request.app.state, "backends", {}))
+    ready = request.app.state.graph is not None
+    return JSONResponse(
+        {"status": "ready" if ready else "degraded", **backends},
+        status_code=200 if ready else 503,
+    )
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
