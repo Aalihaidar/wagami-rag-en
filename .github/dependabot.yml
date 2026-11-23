@@ -72,6 +72,12 @@ updates:
       default-days: 7
     open-pull-requests-limit: 10
     labels: ["dependencies", "docker"]
+    # Stay on Python 3.14 until the lock has prebuilt wheels for 3.15 (grpcio and zstandard have
+    # none yet, and compiling grpcio alone took about 25 minutes of the production build).
+    # Patch and digest updates of 3.14 still arrive. Remove this when moving to 3.15 on purpose.
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     commit-message:
       prefix: "chore(deps)"
     groups:

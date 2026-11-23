@@ -55,7 +55,9 @@ jobs:
     name: Build & Push Production Image
     needs: detect
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    # A healthy build takes a few minutes (dependencies are prebuilt wheels). A build that runs
+    # this long is compiling something from source; fail rather than wait.
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write          # push image to GHCR

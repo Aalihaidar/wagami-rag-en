@@ -1,12 +1,16 @@
 name: Knowledge base health
 
-# Every Monday, ask the live Weaviate Cloud cluster one fixed question and write one small key to
-# the Redis database, and fail loudly if the cluster, the collection, the embedding key or Redis
-# has gone away. The weekly Redis write also keeps a free hosted Redis database from being removed
-# for inactivity. No LLM is called.
+# Twice a week (Monday and Thursday), ask the live Weaviate Cloud cluster one fixed question and
+# write one small key to the Redis database, and fail loudly if the cluster, the collection, the
+# embedding key or Redis has gone away. The Redis write keeps a free hosted Redis database from
+# being removed for inactivity (about two weeks). No LLM is called.
+#
+# The time is deliberately not on the hour: GitHub delays or drops scheduled runs at the start of
+# the hour, when load is highest, and a "0 7 * * 1" schedule never fired on two Mondays in a row.
+# Two runs a week mean one dropped run still leaves the Redis database well inside its window.
 on:
   schedule:
-    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+    - cron: "37 5 * * 1,4" # Mondays and Thursdays 05:37 UTC
   workflow_dispatch: # run it by hand from the Actions tab
 
 permissions:
