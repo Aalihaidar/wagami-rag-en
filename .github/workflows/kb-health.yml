@@ -1,10 +1,16 @@
 name: Knowledge base health
 
-# Every Monday, ask the live Weaviate Cloud cluster one fixed question and fail loudly if the
-# cluster, the collection or the embedding key has gone away. No LLM is called.
+# Twice a week (Monday and Thursday), ask the live Weaviate Cloud cluster one fixed question and
+# write one small key to the Redis database, and fail loudly if the cluster, the collection, the
+# embedding key or Redis has gone away. The Redis write keeps a free hosted Redis database from
+# being removed for inactivity (about two weeks). No LLM is called.
+#
+# The time is deliberately not on the hour: GitHub delays or drops scheduled runs at the start of
+# the hour, when load is highest, and a "0 7 * * 1" schedule never fired on two Mondays in a row.
+# Two runs a week mean one dropped run still leaves the Redis database well inside its window.
 on:
   schedule:
-    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+    - cron: "37 5 * * 1,4" # Mondays and Thursdays 05:37 UTC
   workflow_dispatch: # run it by hand from the Actions tab
 
 permissions:
@@ -22,14 +28,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           cache-suffix: kb-health
       - run: uv sync --frozen --no-dev
-      - name: Ask the default question
+      - name: Ask the default question and keep Redis active
         env:
           WEAVIATE_URL: ${{ secrets.WEAVIATE_URL }}
           WEAVIATE_READ_API_KEY: ${{ secrets.WEAVIATE_READ_API_KEY }}
           EMBEDDING_API_KEY: ${{ secrets.EMBEDDING_API_KEY }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
         run: uv run --no-dev python scripts/check_knowledge_base.py
